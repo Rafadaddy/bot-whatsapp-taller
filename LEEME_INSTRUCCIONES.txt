@@ -1,0 +1,49 @@
+========================================================================
+ GUIA RAPIDA DE USO - BOT DE WHATSAPP PARA TALLER BASE44
+========================================================================
+
+Este bot funciona de manera 100% independiente a la aplicacion y al APK.
+No modifica el sistema del taller ni gasta consultas innecesarias.
+
+------------------------------------------------------------------------
+PASO 1: COMO INICIAR EL BOT
+------------------------------------------------------------------------
+1. Haz doble clic en el archivo "INICIAR_BOT.bat".
+2. Se abrira una ventana negra. Si es la primera vez, aparecera un 
+   CODIGO QR grande en pantalla.
+3. Abre WhatsApp en el celular que enviara los mensajes:
+   - Ve a Ajustes (o los tres puntitos) > "Dispositivos vinculados".
+   - Toca "Vincular un dispositivo" y apunta la camara al codigo QR de la pantalla.
+4. Listo, la sesion queda guardada y ya no tendras que volver a escanearlo.
+
+------------------------------------------------------------------------
+PASO 2: CONFIGURAR LOS DOS GRUPOS (SOLO SE HACE UNA VEZ)
+------------------------------------------------------------------------
+Cuando el bot se conecta por primera vez, veras en pantalla la lista de todos 
+los grupos de WhatsApp en los que estas, por ejemplo:
+
+   [1] "Taller Tráfico Ingresos" -> ID: 120363012345678901@g.us
+   [2] "Taller Unidades Listas"  -> ID: 120363098765432109@g.us
+
+1. Abre el archivo "config.json" con el Bloc de Notas.
+2. Pega el ID del grupo de ingresos en "grupoIngresosId":
+   "grupoIngresosId": "120363012345678901@g.us"
+3. Pega el ID del grupo de listas en "grupoListasId":
+   "grupoListasId": "120363098765432109@g.us"
+4. Guarda el archivo y listo.
+
+------------------------------------------------------------------------
+PASO 3: COMO DETENER EL BOT
+------------------------------------------------------------------------
+Para apagar el bot cuando no quieras que envie mensajes:
+- Simplemente cierra la ventana negra haciendo clic en la "X" arriba a la derecha.
+- Tu computadora sigue prendida y la app en los celulares sigue funcionando al 100%.
+
+------------------------------------------------------------------------
+PROTECCION CONTRA DUPLICADOS Y SPAM:
+------------------------------------------------------------------------
+Cada vez que abres el bot en la manana, este toma la hora exacta de arranque 
+e IGNORA todo lo que se registro antes de abrirlo (las que se quedaron de ayer 
+o lo que trafico registro a las 5 am). Solo enviara lo que ocurra a partir 
+del momento en que el bot esta activo.
+========================================================================
