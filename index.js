@@ -736,6 +736,28 @@ server.post('/logout', async (req, res) => {
   res.redirect('/');
 });
 
+server.get('/debug', (req, res) => {
+  res.json({
+    estadoConexion,
+    botActivo,
+    hasSocket: !!socketWhatsApp,
+    wsReadyState: socketWhatsApp?.ws?.readyState, // 0: CONNECTING, 1: OPEN, 2: CLOSING, 3: CLOSED
+    user: socketWhatsApp?.user || null,
+    gruposCount: gruposDetectados.length,
+    config: leerConfig()
+  });
+});
+
+server.get('/force-send', async (req, res) => {
+  config = leerConfig();
+  try {
+    const r = await socketWhatsApp.sendMessage(config.grupoIngresosId, { text: `🔔 Prueba directa: ${new Date().toLocaleTimeString('es-MX')}` });
+    res.json({ ok: true, messageId: r?.key?.id, status: r?.status });
+  } catch (e) {
+    res.json({ ok: false, error: e.message });
+  }
+});
+
 server.post('/probar-ingresos', async (req, res) => {
   config = leerConfig();
   await enviarMensajeGrupo(config.grupoIngresosId, `🧪 Prueba de conexión - ${new Date().toLocaleTimeString('es-MX')}`);
