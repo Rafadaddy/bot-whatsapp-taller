@@ -748,6 +748,24 @@ server.get('/debug', (req, res) => {
   });
 });
 
+server.get('/group-info', async (req, res) => {
+  config = leerConfig();
+  try {
+    const meta = await socketWhatsApp.groupMetadata(config.grupoIngresosId);
+    res.json({
+      ok: true,
+      id: meta.id,
+      subject: meta.subject,
+      participantsCount: meta.participants?.length,
+      isParticipant: meta.participants?.some(p => p.id.includes('5212311547844')),
+      announce: meta.announce, // true if only admins can send
+      restrict: meta.restrict
+    });
+  } catch (e) {
+    res.json({ ok: false, error: e.message });
+  }
+});
+
 server.get('/force-send', async (req, res) => {
   config = leerConfig();
   try {
