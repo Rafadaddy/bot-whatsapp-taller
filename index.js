@@ -45,6 +45,7 @@ const estadosConocidos = new Map();
 let notifiedSet = new Set();
 let historialActividad = [];
 const MAX_HISTORIAL = 20;
+let ultimaUnidadIngreso = { numero: '5599', mensaje: '*5599* CHECAR BANDA (RECHINA)' };
 
 function registrarActividad(tipo, detalle, ok = true) {
   const hora = new Date().toLocaleTimeString('es-MX', { timeZone: 'America/Mexico_City', hour12: false });
@@ -355,6 +356,7 @@ async function notificarIngresoSiAplica(docId, unit) {
 
   const numUnidad = unit.unit_number || 'S/N';
   const mensaje = construirMensajeIngreso(unit, numUnidad);
+  ultimaUnidadIngreso = { numero: numUnidad, mensaje };
   console.log(`\n🆕 [NUEVA UNIDAD] #${numUnidad} -> Enviando a WhatsApp...`);
   config = leerConfig();
   const ok = await enviarMensajeGrupo(config.grupoIngresosId, mensaje);
@@ -597,8 +599,8 @@ server.get('/', (req, res) => {
         <form action="/probar-listas" method="POST" style="flex: 1; margin: 0;">
           <button type="submit" class="btn btn-save" style="font-size: 11px; padding: 8px 2px; margin: 0; background: #059669;">🧪 Probar Listas</button>
         </form>
-        <form action="/reenviar-5599" method="POST" style="flex: 1; margin: 0;">
-          <button type="submit" class="btn btn-save" style="font-size: 11px; padding: 8px 2px; margin: 0; background: #d97706;">🔁 Reenviar 5599</button>
+        <form action="/reenviar-ultima" method="POST" style="flex: 1; margin: 0;">
+          <button type="submit" class="btn btn-save" style="font-size: 11px; padding: 8px 2px; margin: 0; background: #d97706;">🔁 Reenviar última ${ultimaUnidadIngreso.numero ? `(#${ultimaUnidadIngreso.numero})` : ''}</button>
         </form>
       </div>
       <form action="/logout" method="POST" onsubmit="return confirm('¿Seguro que deseas desvincular el celular?');">
@@ -692,6 +694,11 @@ server.get('/', (req, res) => {
     ${estadoConexion !== 'conectado' ? `
       setTimeout(() => location.reload(), 4000);
     ` : ''}
+
+    // Mantener activo el servidor en Render si esta página está abierta en la PC o celular
+    setInterval(() => {
+      fetch('/health').catch(() => {});
+    }, 60000);
   </script>
 </body>
 </html>
@@ -741,9 +748,11 @@ server.post('/probar-listas', async (req, res) => {
   res.redirect('/');
 });
 
-server.post('/reenviar-5599', async (req, res) => {
-  config = leerConfig();
-  await enviarMensajeGrupo(config.grupoIngresosId, `*5599* CHECAR BANDA (RECHINA)`);
+server.post('/reenviar-ultima', async (req, res) => {
+  if (ultimaUnidadIngreso && ultimaUnidadIngreso.mensaje) {
+    config = leerConfig();
+    await enviarMensajeGrupo(config.grupoIngresosId, ultimaUnidadIngreso.mensaje);
+  }
   res.redirect('/');
 });
 
