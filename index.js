@@ -1,4 +1,4 @@
-import makeWASocket, { DisconnectReason, useMultiFileAuthState } from '@whiskeysockets/baileys';
+import makeWASocket, { Browsers, DisconnectReason, useMultiFileAuthState } from '@whiskeysockets/baileys';
 import qrcodeTerminal from 'qrcode-terminal';
 import QRCode from 'qrcode';
 import pino from 'pino';
@@ -33,9 +33,8 @@ const firestore = getFirestore(app);
 
 // Estado en memoria
 const BOT_START_TIMESTAMP = Date.now();
-let botActivo = true; // Interruptor general (ON/OFF)
+let botActivo = true;
 let estadoConexion = 'iniciando'; // 'iniciando', 'esperando_qr', 'conectado', 'desconectado'
-let ultimoQR = null;
 let ultimoQRDataURL = null;
 let gruposDetectados = [];
 let socketWhatsApp = null;
@@ -64,24 +63,26 @@ function guardarConfig(nuevaConfig) {
 
 let config = leerConfig();
 
-// --- PERSISTENCIA DE SESIÓN EN FIREBASE (Para que no se cierre en Render) ---
+// --- PERSISTENCIA DE SESIÓN EN FIREBASE ---
 async function restaurarSesionDesdeFirebase() {
   try {
     if (!fs.existsSync(AUTH_DIR)) fs.mkdirSync(AUTH_DIR, { recursive: true });
     const snap = await getDoc(doc(firestore, '_system', 'whatsapp_session'));
     if (snap.exists()) {
       const data = snap.data();
-      if (data && data.files) {
+      if (data && data.files && Object.keys(data.files).length > 0) {
         console.log('🔄 Restaurando sesión de WhatsApp guardada en la nube...');
         for (const [filename, content] of Object.entries(data.files)) {
           fs.writeFileSync(path.join(AUTH_DIR, filename), content, 'utf-8');
         }
         console.log('✅ Sesión restaurada con éxito.');
+        return true;
       }
     }
   } catch (e) {
     console.warn('No se pudo restaurar sesión de Firebase:', e.message);
   }
+  return false;
 }
 
 async function respaldarSesionAFirebase() {
@@ -115,15 +116,20 @@ async function limpiarSesionFirebase() {
   }
 }
 
-// 2. Conexión de WhatsApp (Baileys)
+// 2. Conexión de WhatsApp
 async function iniciarWhatsApp() {
+  estadoConexion = 'iniciando';
+  console.log('⏳ Iniciando conexión de WhatsApp...');
   await restaurarSesionDesdeFirebase();
   const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
 
   socketWhatsApp = makeWASocket({
     auth: state,
+    browser: Browsers.ubuntu('Chrome'),
     logger: pino({ level: 'silent' }),
-    printQRInTerminal: false
+    printQRInTerminal: false,
+    connectTimeoutMs: 60000,
+    defaultQueryTimeoutMs: 60000
   });
 
   socketWhatsApp.ev.on('creds.update', async () => {
@@ -136,22 +142,17 @@ async function iniciarWhatsApp() {
 
     if (qr) {
       estadoConexion = 'esperando_qr';
-      ultimoQR = qr;
-      ultimoQRDataURL = await QRCode.toDataURL(qr);
-      console.log('\n📱 Código QR generado para WhatsApp (disponible en la página web).');
-      try {
-        qrcodeTerminal.generate(qr, { small: true });
-      } catch (e) {}
+      ultimoQRDataURL = await QRCode.toDataURL(qr, { margin: 2, scale: 8 });
+      console.log('📱 ¡Código QR generado con éxito! Visible en la página web.');
+      try { qrcodeTerminal.generate(qr, { small: true }); } catch (e) {}
     }
 
     if (connection === 'open') {
       estadoConexion = 'conectado';
-      ultimoQR = null;
       ultimoQRDataURL = null;
-      console.log('\n✅ ¡WHATSAPP CONECTADO EXITOSAMENTE A LA NUBE!');
+      console.log('✅ ¡WHATSAPP CONECTADO EXITOSAMENTE A LA NUBE!');
       await respaldarSesionAFirebase();
 
-      // Cargar grupos disponibles
       try {
         const grupos = await socketWhatsApp.groupFetchAllParticipating();
         gruposDetectados = Object.values(grupos).map(g => ({
@@ -170,13 +171,15 @@ async function iniciarWhatsApp() {
     }
 
     if (connection === 'close') {
-      estadoConexion = 'desconectado';
       const statusCode = lastDisconnect?.error?.output?.statusCode;
       const debeReconectar = statusCode !== DisconnectReason.loggedOut;
       console.log(`⚠️ Conexión de WhatsApp cerrada (Código: ${statusCode}). Reconectando: ${debeReconectar}`);
+      
       if (debeReconectar) {
-        setTimeout(iniciarWhatsApp, 4000);
+        estadoConexion = 'iniciando';
+        setTimeout(iniciarWhatsApp, 3000);
       } else {
+        estadoConexion = 'desconectado';
         console.log('❌ Sesión cerrada permanentemente.');
         await limpiarSesionFirebase();
         setTimeout(iniciarWhatsApp, 2000);
@@ -224,8 +227,7 @@ function iniciarListenerFirebase() {
         });
       });
       esCargaInicial = false;
-      console.log(`⚡ Sincronización inicial: ${estadosConocidos.size} unidades registradas en memoria.`);
-      console.log(`🟢 Monitoreando cambios en tiempo real a partir de este momento...\n`);
+      console.log(`⚡ Sincronización inicial: ${estadosConocidos.size} unidades registradas.`);
       return;
     }
 
@@ -236,7 +238,7 @@ function iniciarListenerFirebase() {
       const numUnidad = unit.unit_number || 'S/N';
       config = leerConfig();
 
-      // NUEVA UNIDAD REGISTRADA
+      // NUEVA UNIDAD
       if (change.type === 'added') {
         const yaExiste = estadosConocidos.has(docId);
         estadosConocidos.set(docId, {
@@ -260,7 +262,7 @@ function iniciarListenerFirebase() {
             }
 
             const mensaje = `*${numUnidad}*${fallasTexto}`;
-            console.log(`\n🆕 [NUEVA UNIDAD REGISTRADA] Enviando a Tráfico...`);
+            console.log(`\n🆕 [NUEVA UNIDAD] Enviando al grupo...`);
             await enviarMensajeGrupo(config.grupoIngresosId, mensaje);
           }
         }
@@ -277,10 +279,9 @@ function iniciarListenerFirebase() {
           unit_number: numUnidad
         });
 
-        // Cambio a lista
         if (estatusActual === 'lista' && estatusAnterior !== 'lista') {
           const mensaje = `${numUnidad} lista`;
-          console.log(`\n🎉 [UNIDAD LISTA] Unidad #${numUnidad} terminada. Enviando...`);
+          console.log(`\n🎉 [UNIDAD LISTA] Unidad #${numUnidad} lista.`);
           await enviarMensajeGrupo(config.grupoListasId, mensaje);
         }
       }
@@ -294,7 +295,7 @@ function iniciarListenerFirebase() {
   });
 }
 
-// 4. Servidor Web Express (Panel de Control y Render Healthcheck)
+// 4. Servidor Web Express (Panel de Control)
 const server = express();
 server.use(express.json());
 server.use(express.urlencoded({ extended: true }));
@@ -309,73 +310,94 @@ server.get('/', (req, res) => {
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Panel Bot WhatsApp - Taller Base44</title>
   <style>
-    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; background: #0f172a; color: #f8fafc; margin: 0; padding: 20px; }
-    .card { background: #1e293b; border-radius: 16px; padding: 24px; max-width: 520px; margin: 0 auto 20px; box-shadow: 0 4px 20px rgba(0,0,0,0.4); border: 1px solid #334155; }
-    h1 { font-size: 20px; margin-top: 0; display: flex; align-items: center; justify-content: space-between; }
-    .badge { font-size: 13px; padding: 6px 12px; border-radius: 20px; font-weight: bold; }
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #0f172a; color: #f8fafc; margin: 0; padding: 16px; }
+    .card { background: #1e293b; border-radius: 16px; padding: 20px; max-width: 520px; margin: 0 auto 16px; box-shadow: 0 4px 20px rgba(0,0,0,0.4); border: 1px solid #334155; }
+    h1 { font-size: 18px; margin: 0 0 16px 0; display: flex; align-items: center; justify-content: space-between; }
+    .badge { font-size: 12px; padding: 6px 12px; border-radius: 20px; font-weight: bold; }
     .badge-conectado { background: #059669; color: #fff; }
-    .badge-qr { background: #d97706; color: #fff; }
+    .badge-qr { background: #d97706; color: #fff; animation: pulse 1.5s infinite; }
+    .badge-iniciando { background: #6366f1; color: #fff; }
     .badge-desconectado { background: #dc2626; color: #fff; }
-    .qr-container { text-align: center; margin: 20px 0; background: #fff; padding: 16px; border-radius: 12px; }
-    .qr-container img { max-width: 260px; height: auto; }
-    .btn { display: inline-block; width: 100%; padding: 14px; font-size: 15px; font-weight: bold; border-radius: 10px; border: none; cursor: pointer; text-align: center; box-sizing: border-box; text-decoration: none; margin-top: 10px; transition: opacity 0.2s; }
+    @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.6; } }
+    .qr-container { text-align: center; margin: 16px 0; background: #fff; padding: 16px; border-radius: 12px; }
+    .qr-container img { max-width: 260px; width: 100%; height: auto; }
+    .btn { display: inline-block; width: 100%; padding: 12px; font-size: 14px; font-weight: bold; border-radius: 8px; border: none; cursor: pointer; text-align: center; box-sizing: border-box; text-decoration: none; margin-top: 8px; }
     .btn-toggle-on { background: #10b981; color: white; }
     .btn-toggle-off { background: #64748b; color: white; }
     .btn-save { background: #3b82f6; color: white; }
     .btn-danger { background: #ef4444; color: white; }
-    .form-group { margin-bottom: 16px; }
+    .btn-assign { padding: 6px 10px; font-size: 11px; font-weight: bold; border-radius: 6px; border: none; cursor: pointer; color: white; }
+    .btn-blue { background: #2563eb; }
+    .btn-green { background: #059669; }
+    .form-group { margin-bottom: 14px; }
     label { display: block; font-size: 13px; color: #94a3b8; margin-bottom: 6px; font-weight: 600; }
-    input[type="text"] { width: 100%; padding: 12px; background: #0f172a; border: 1px solid #334155; border-radius: 8px; color: #fff; font-size: 14px; box-sizing: border-box; }
-    .group-item { background: #0f172a; padding: 10px 14px; border-radius: 8px; margin-bottom: 8px; font-size: 13px; display: flex; justify-content: space-between; align-items: center; }
-    .group-id { color: #38bdf8; font-family: monospace; font-size: 11px; }
+    input[type="text"] { width: 100%; padding: 12px; background: #0f172a; border: 1px solid #334155; border-radius: 8px; color: #fff; font-size: 13px; box-sizing: border-box; }
+    .group-item { background: #0f172a; padding: 12px; border-radius: 10px; margin-bottom: 10px; border: 1px solid #1e293b; }
+    .group-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; }
+    .group-name { font-weight: bold; font-size: 14px; color: #f1f5f9; }
+    .group-id { color: #38bdf8; font-family: monospace; font-size: 11px; word-break: break-all; }
+    .group-actions { display: flex; gap: 8px; margin-top: 8px; }
   </style>
 </head>
 <body>
   <div class="card">
     <h1>
       <span>🤖 Bot Taller Base44</span>
-      <span class="badge ${estadoConexion === 'conectado' ? 'badge-conectado' : (estadoConexion === 'esperando_qr' ? 'badge-qr' : 'badge-desconectado')}">
-        ${estadoConexion === 'conectado' ? '● Conectado' : (estadoConexion === 'esperando_qr' ? '● Escanear QR' : '● Desconectado')}
+      <span class="badge ${
+        estadoConexion === 'conectado' ? 'badge-conectado' : 
+        (estadoConexion === 'esperando_qr' ? 'badge-qr' : 
+        (estadoConexion === 'iniciando' ? 'badge-iniciando' : 'badge-desconectado'))
+      }">
+        ${
+          estadoConexion === 'conectado' ? '● Conectado' : 
+          (estadoConexion === 'esperando_qr' ? '● Escanear QR' : 
+          (estadoConexion === 'iniciando' ? '● Iniciando...' : '● Reconectando...'))
+        }
       </span>
     </h1>
 
-    <div style="margin: 20px 0;">
+    <div style="margin: 14px 0;">
       <label>ESTADO DEL SERVICIO:</label>
       <form action="/toggle" method="POST">
         <button type="submit" class="btn ${botActivo ? 'btn-toggle-on' : 'btn-toggle-off'}">
-          ${botActivo ? '🟢 BOT ACTIVO (Tocame para pausar)' : '⏸️ BOT EN PAUSA (Tocame para activar)'}
+          ${botActivo ? '🟢 BOT ACTIVO (Toca para pausar)' : '⏸️ BOT EN PAUSA (Toca para activar)'}
         </button>
       </form>
     </div>
 
     ${estadoConexion === 'esperando_qr' && ultimoQRDataURL ? `
       <div class="qr-container">
-        <p style="color: #0f172a; font-weight: bold; margin-top: 0;">Escanea este código con WhatsApp:</p>
+        <p style="color: #0f172a; font-weight: bold; margin-top: 0; font-size: 14px;">Escanea este código con tu WhatsApp:</p>
         <img src="${ultimoQRDataURL}" alt="Código QR WhatsApp" />
-        <p style="color: #64748b; font-size: 12px; margin-bottom: 0;">Ajustes > Dispositivos vinculados > Vincular un dispositivo</p>
+        <p style="color: #64748b; font-size: 11px; margin-bottom: 0;">WhatsApp > 3 puntitos > Dispositivos vinculados</p>
       </div>
-      <p style="text-align: center; font-size: 12px; color: #94a3b8;">La página se actualizará automáticamente cuando te vincules.</p>
-      <script>setTimeout(() => location.reload(), 5000);</script>
+    ` : ''}
+
+    ${estadoConexion === 'iniciando' || (estadoConexion !== 'conectado' && !ultimoQRDataURL) ? `
+      <div style="text-align: center; padding: 20px 10px; background: #0f172a; border-radius: 12px; margin: 16px 0;">
+        <p style="margin: 0; font-size: 14px; color: #cbd5e1;">⏳ Conectando con WhatsApp...</p>
+        <p style="margin: 6px 0 0 0; font-size: 12px; color: #64748b;">La página se actualizará sola cuando aparezca el código QR.</p>
+      </div>
     ` : ''}
 
     ${estadoConexion === 'conectado' ? `
-      <p style="color: #10b981; font-size: 14px; text-align: center;">✅ Tu WhatsApp está vinculado y trabajando activamente.</p>
-      <form action="/logout" method="POST" onsubmit="return confirm('¿Seguro que deseas desvincular el WhatsApp actual?');">
+      <p style="color: #10b981; font-size: 13px; text-align: center; margin: 10px 0;">✅ WhatsApp vinculado y listo para enviar mensajes.</p>
+      <form action="/logout" method="POST" onsubmit="return confirm('¿Seguro que deseas desvincular el celular?');">
         <button type="submit" class="btn btn-danger">Desvincular WhatsApp / Cambiar Celular</button>
       </form>
     ` : ''}
   </div>
 
   <div class="card">
-    <h2 style="font-size: 17px; margin-top: 0;">🎯 Configuración de Grupos</h2>
+    <h2 style="font-size: 16px; margin-top: 0;">🎯 Grupos Asignados</h2>
     <form action="/guardar-config" method="POST">
       <div class="form-group">
-        <label>ID Grupo Tráfico (Ingresos / Nuevas unidades):</label>
-        <input type="text" name="grupoIngresosId" value="${config.grupoIngresosId || ''}" placeholder="Ej: 120363012345678901@g.us" />
+        <label>Grupo Tráfico (Nuevas Unidades):</label>
+        <input type="text" id="inputIngresos" name="grupoIngresosId" value="${config.grupoIngresosId || ''}" placeholder="ID de Mecánicos Teziutlan" />
       </div>
       <div class="form-group">
-        <label>ID Grupo Listas (Unidades terminadas):</label>
-        <input type="text" name="grupoListasId" value="${config.grupoListasId || ''}" placeholder="Ej: 120363098765432109@g.us" />
+        <label>Grupo Listas (Unidades terminadas):</label>
+        <input type="text" id="inputListas" name="grupoListasId" value="${config.grupoListasId || ''}" placeholder="ID de Unidades listas" />
       </div>
       <button type="submit" class="btn btn-save">Guardar Grupos</button>
     </form>
@@ -383,16 +405,37 @@ server.get('/', (req, res) => {
 
   ${gruposDetectados.length > 0 ? `
     <div class="card">
-      <h2 style="font-size: 16px; margin-top: 0;">📋 Grupos detectados en tu WhatsApp:</h2>
-      <p style="font-size: 12px; color: #94a3b8;">Copia el ID azul del grupo que corresponda y pégalo arriba.</p>
+      <h2 style="font-size: 15px; margin-top: 0;">📋 Tus Grupos de WhatsApp:</h2>
+      <p style="font-size: 12px; color: #94a3b8; margin-top: 0;">Toca el botón azul o verde para asignar el grupo directamente:</p>
       ${gruposDetectados.map(g => `
         <div class="group-item">
-          <strong>${g.name}</strong>
-          <span class="group-id">${g.id}</span>
+          <div class="group-header">
+            <span class="group-name">${g.name}</span>
+          </div>
+          <div class="group-id">${g.id}</div>
+          <div class="group-actions">
+            <button type="button" class="btn-assign btn-blue" onclick="asignarIngresos('${g.id}')">Usar para Nuevas</button>
+            <button type="button" class="btn-assign btn-green" onclick="asignarListas('${g.id}')">Usar para Listas</button>
+          </div>
         </div>
       `).join('')}
     </div>
   ` : ''}
+
+  <script>
+    function asignarIngresos(id) {
+      document.getElementById('inputIngresos').value = id;
+      alert('Asignado para Nuevas Unidades. Haz clic en \"Guardar Grupos\" para confirmar.');
+    }
+    function asignarListas(id) {
+      document.getElementById('inputListas').value = id;
+      alert('Asignado para Unidades Listas. Haz clic en \"Guardar Grupos\" para confirmar.');
+    }
+    ${estadoConexion !== 'conectado' ? `
+      // Auto-recargar cada 4 segundos mientras no esté conectado para mostrar el QR
+      setTimeout(() => location.reload(), 4000);
+    ` : ''}
+  </script>
 </body>
 </html>
   `);
@@ -400,7 +443,6 @@ server.get('/', (req, res) => {
 
 server.post('/toggle', (req, res) => {
   botActivo = !botActivo;
-  console.log(`Bot cambiado a: ${botActivo ? 'ACTIVO' : 'PAUSADO'}`);
   res.redirect('/');
 });
 
@@ -412,12 +454,10 @@ server.post('/guardar-config', (req, res) => {
     grupoListasId: (grupoListasId || '').trim()
   };
   guardarConfig(config);
-  console.log('Nueva configuración guardada:', config);
   res.redirect('/');
 });
 
 server.post('/logout', async (req, res) => {
-  console.log('Desvinculando WhatsApp por solicitud del usuario...');
   if (socketWhatsApp) {
     try { await socketWhatsApp.logout(); } catch (e) {}
   }
@@ -426,7 +466,6 @@ server.post('/logout', async (req, res) => {
   res.redirect('/');
 });
 
-// Render health check
 server.get('/health', (req, res) => res.send('OK'));
 
 const PORT = process.env.PORT || 3000;
