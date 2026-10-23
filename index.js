@@ -65,7 +65,7 @@ function guardarConfigLocal(nuevaConfig) {
 
 let config = leerConfig();
 
-// --- PERSISTENCIA EN FIREBASE (Sesión y Configuración) ---
+// --- PERSISTENCIA EN FIREBASE ---
 async function autenticarFirebase() {
   try {
     await signInWithEmailAndPassword(auth, 'bot@taller.local', 'BotPasswordTaller2026!');
@@ -95,6 +95,7 @@ async function restaurarConfigDesdeFirebase() {
 async function guardarConfigEnFirebase(nuevaConfig) {
   try {
     await setDoc(doc(firestore, '_system', 'whatsapp_config'), nuevaConfig);
+    console.log('💾 Grupos guardados permanentemente en Firebase.');
   } catch (e) {
     console.warn('Error al guardar config en Firebase:', e.message);
   }
@@ -137,7 +138,7 @@ async function respaldarSesionAFirebase() {
         files,
         updated_at: new Date().toISOString()
       });
-      console.log(`💾 Sesión de WhatsApp respaldada en la nube (${Object.keys(files).length} archivos).`);
+      console.log(`💾 Sesión respaldada en Firebase (${Object.keys(files).length} archivos).`);
     }
   } catch (e) {
     console.warn('Error al respaldar sesión en Firebase:', e.message);
@@ -153,6 +154,22 @@ async function limpiarSesionFirebase() {
     console.log('🗑️ Sesión borrada de la nube y del disco.');
   } catch (e) {
     console.warn('Error al limpiar sesión:', e.message);
+  }
+}
+
+// Función para obtener grupos de WhatsApp
+async function actualizarGrupos() {
+  if (!socketWhatsApp || estadoConexion !== 'conectado') return;
+  try {
+    console.log('🔄 Sincronizando grupos de WhatsApp...');
+    const grupos = await socketWhatsApp.groupFetchAllParticipating();
+    gruposDetectados = Object.values(grupos).map(g => ({
+      id: g.id,
+      name: g.subject
+    }));
+    console.log(`📋 ¡${gruposDetectados.length} grupos detectados con éxito!`);
+  } catch (e) {
+    console.warn('Reintentando sincronizar grupos...', e.message);
   }
 }
 
@@ -184,26 +201,19 @@ async function iniciarWhatsApp() {
     if (qr) {
       estadoConexion = 'esperando_qr';
       ultimoQRDataURL = await QRCode.toDataURL(qr, { margin: 2, scale: 8 });
-      console.log('📱 ¡Código QR generado con éxito! Visible en la página web.');
+      console.log('📱 ¡Código QR generado con éxito!');
       try { qrcodeTerminal.generate(qr, { small: true }); } catch (e) {}
     }
 
     if (connection === 'open') {
       estadoConexion = 'conectado';
       ultimoQRDataURL = null;
-      console.log('✅ ¡WHATSAPP CONECTADO EXITOSAMENTE A LA NUBE!');
+      console.log('✅ ¡WHATSAPP CONECTADO EXITOSAMENTE!');
       await respaldarSesionAFirebase();
 
-      try {
-        const grupos = await socketWhatsApp.groupFetchAllParticipating();
-        gruposDetectados = Object.values(grupos).map(g => ({
-          id: g.id,
-          name: g.subject
-        }));
-        console.log(`📋 ${gruposDetectados.length} grupos detectados.`);
-      } catch (e) {
-        console.warn('Error al obtener grupos:', e.message);
-      }
+      // Esperar 3 segundos para que WhatsApp termine de sincronizar chats antes de consultar grupos
+      setTimeout(actualizarGrupos, 3000);
+      setTimeout(actualizarGrupos, 8000);
 
       if (!listenerIniciado) {
         iniciarListenerFirebase();
@@ -373,7 +383,7 @@ server.get('/', (req, res) => {
     .form-group { margin-bottom: 14px; }
     label { display: block; font-size: 13px; color: #94a3b8; margin-bottom: 6px; font-weight: 600; }
     input[type="text"] { width: 100%; padding: 12px; background: #0f172a; border: 1px solid #334155; border-radius: 8px; color: #fff; font-size: 13px; box-sizing: border-box; }
-    .group-item { background: #0f172a; padding: 12px; border-radius: 10px; margin-bottom: 10px; border: 1px solid #1e293b; }
+    .group-item { background: #0f172a; padding: 12px; border-radius: 10px; margin-bottom: 10px; border: 1px solid #334155; }
     .group-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; }
     .group-name { font-weight: bold; font-size: 14px; color: #f1f5f9; }
     .group-id { color: #38bdf8; font-family: monospace; font-size: 11px; word-break: break-all; }
@@ -444,22 +454,37 @@ server.get('/', (req, res) => {
     </form>
   </div>
 
-  ${gruposDetectados.length > 0 ? `
+  ${estadoConexion === 'conectado' ? `
     <div class="card">
-      <h2 style="font-size: 15px; margin-top: 0;">📋 Tus Grupos de WhatsApp:</h2>
-      <p style="font-size: 12px; color: #94a3b8; margin-top: 0;">Toca el botón azul o verde para asignar el grupo directamente:</p>
-      ${gruposDetectados.map(g => `
-        <div class="group-item">
-          <div class="group-header">
-            <span class="group-name">${g.name}</span>
-          </div>
-          <div class="group-id">${g.id}</div>
-          <div class="group-actions">
-            <button type="button" class="btn-assign btn-blue" onclick="asignarIngresos('${g.id}')">Usar para Nuevas</button>
-            <button type="button" class="btn-assign btn-green" onclick="asignarListas('${g.id}')">Usar para Listas</button>
-          </div>
+      <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
+        <h2 style="font-size: 15px; margin: 0;">📋 Tus Grupos de WhatsApp:</h2>
+        <form action="/cargar-grupos" method="POST" style="margin: 0;">
+          <button type="submit" class="btn-assign btn-blue" style="font-size: 12px; padding: 6px 12px;">🔄 Buscar Grupos</button>
+        </form>
+      </div>
+
+      ${gruposDetectados.length === 0 ? `
+        <div style="text-align: center; padding: 16px; background: #0f172a; border-radius: 10px;">
+          <p style="font-size: 13px; color: #94a3b8; margin: 0 0 10px 0;">Presiona el botón azul para listar los grupos de tu WhatsApp:</p>
+          <form action="/cargar-grupos" method="POST">
+            <button type="submit" class="btn btn-save">🔄 Obtener Mis Grupos de WhatsApp</button>
+          </form>
         </div>
-      `).join('')}
+      ` : `
+        <p style="font-size: 12px; color: #94a3b8; margin-top: 0;">Toca el botón azul o verde para asignar el grupo directamente:</p>
+        ${gruposDetectados.map(g => `
+          <div class="group-item">
+            <div class="group-header">
+              <span class="group-name">${g.name}</span>
+            </div>
+            <div class="group-id">${g.id}</div>
+            <div class="group-actions">
+              <button type="button" class="btn-assign btn-blue" onclick="asignarIngresos('${g.id}')">Usar para Nuevas</button>
+              <button type="button" class="btn-assign btn-green" onclick="asignarListas('${g.id}')">Usar para Listas</button>
+            </div>
+          </div>
+        `).join('')}
+      `}
     </div>
   ` : ''}
 
@@ -479,6 +504,11 @@ server.get('/', (req, res) => {
 </body>
 </html>
   `);
+});
+
+server.post('/cargar-grupos', async (req, res) => {
+  await actualizarGrupos();
+  res.redirect('/');
 });
 
 server.post('/toggle', (req, res) => {
