@@ -10,6 +10,7 @@ import express from 'express';
 
 const require = createRequire(import.meta.url);
 const { initializeApp } = require('firebase/app');
+const { getAuth, signInWithEmailAndPassword } = require('firebase/auth');
 const { getFirestore, collection, onSnapshot, query, where, doc, getDoc, setDoc, deleteDoc } = require('firebase/firestore');
 
 const __filename = fileURLToPath(import.meta.url);
@@ -29,6 +30,7 @@ const firebaseConfig = {
 };
 
 const app = initializeApp(firebaseConfig);
+const auth = getAuth(app);
 const firestore = getFirestore(app);
 
 // Estado en memoria
@@ -41,7 +43,7 @@ let socketWhatsApp = null;
 let listenerIniciado = false;
 const estadosConocidos = new Map();
 
-// Leer y guardar configuración
+// Leer y guardar configuración local
 function leerConfig() {
   try {
     if (fs.existsSync(CONFIG_PATH)) {
@@ -53,7 +55,7 @@ function leerConfig() {
   return { grupoIngresosId: '', grupoListasId: '' };
 }
 
-function guardarConfig(nuevaConfig) {
+function guardarConfigLocal(nuevaConfig) {
   try {
     fs.writeFileSync(CONFIG_PATH, JSON.stringify(nuevaConfig, null, 2));
   } catch (err) {
@@ -63,7 +65,41 @@ function guardarConfig(nuevaConfig) {
 
 let config = leerConfig();
 
-// --- PERSISTENCIA DE SESIÓN EN FIREBASE ---
+// --- PERSISTENCIA EN FIREBASE (Sesión y Configuración) ---
+async function autenticarFirebase() {
+  try {
+    await signInWithEmailAndPassword(auth, 'bot@taller.local', 'BotPasswordTaller2026!');
+    console.log('🔐 Sesión de Firebase iniciada correctamente.');
+  } catch (e) {
+    console.error('❌ Error al iniciar sesión en Firebase:', e.message);
+  }
+}
+
+async function restaurarConfigDesdeFirebase() {
+  try {
+    const snap = await getDoc(doc(firestore, '_system', 'whatsapp_config'));
+    if (snap.exists()) {
+      const data = snap.data();
+      config = {
+        grupoIngresosId: data.grupoIngresosId || config.grupoIngresosId || '',
+        grupoListasId: data.grupoListasId || config.grupoListasId || ''
+      };
+      guardarConfigLocal(config);
+      console.log('🎯 Configuración de grupos restaurada desde la nube:', config);
+    }
+  } catch (e) {
+    console.warn('No se pudo restaurar config desde Firebase:', e.message);
+  }
+}
+
+async function guardarConfigEnFirebase(nuevaConfig) {
+  try {
+    await setDoc(doc(firestore, '_system', 'whatsapp_config'), nuevaConfig);
+  } catch (e) {
+    console.warn('Error al guardar config en Firebase:', e.message);
+  }
+}
+
 async function restaurarSesionDesdeFirebase() {
   try {
     if (!fs.existsSync(AUTH_DIR)) fs.mkdirSync(AUTH_DIR, { recursive: true });
@@ -71,11 +107,11 @@ async function restaurarSesionDesdeFirebase() {
     if (snap.exists()) {
       const data = snap.data();
       if (data && data.files && Object.keys(data.files).length > 0) {
-        console.log('🔄 Restaurando sesión de WhatsApp guardada en la nube...');
-        for (const [filename, content] of Object.entries(data.files)) {
-          fs.writeFileSync(path.join(AUTH_DIR, filename), content, 'utf-8');
+        console.log(`🔄 Restaurando sesión de WhatsApp guardada en la nube (${Object.keys(data.files).length} archivos)...`);
+        for (const [filename, base64Content] of Object.entries(data.files)) {
+          fs.writeFileSync(path.join(AUTH_DIR, filename), Buffer.from(base64Content, 'base64'));
         }
-        console.log('✅ Sesión restaurada con éxito.');
+        console.log('✅ ¡Sesión de WhatsApp restaurada con éxito!');
         return true;
       }
     }
@@ -93,13 +129,16 @@ async function respaldarSesionAFirebase() {
     for (const f of fileList) {
       const fullPath = path.join(AUTH_DIR, f);
       if (fs.statSync(fullPath).isFile()) {
-        files[f] = fs.readFileSync(fullPath, 'utf-8');
+        files[f] = fs.readFileSync(fullPath).toString('base64');
       }
     }
-    await setDoc(doc(firestore, '_system', 'whatsapp_session'), {
-      files,
-      updated_at: new Date().toISOString()
-    });
+    if (Object.keys(files).length > 0) {
+      await setDoc(doc(firestore, '_system', 'whatsapp_session'), {
+        files,
+        updated_at: new Date().toISOString()
+      });
+      console.log(`💾 Sesión de WhatsApp respaldada en la nube (${Object.keys(files).length} archivos).`);
+    }
   } catch (e) {
     console.warn('Error al respaldar sesión en Firebase:', e.message);
   }
@@ -111,6 +150,7 @@ async function limpiarSesionFirebase() {
     if (fs.existsSync(AUTH_DIR)) {
       fs.rmSync(AUTH_DIR, { recursive: true, force: true });
     }
+    console.log('🗑️ Sesión borrada de la nube y del disco.');
   } catch (e) {
     console.warn('Error al limpiar sesión:', e.message);
   }
@@ -119,7 +159,8 @@ async function limpiarSesionFirebase() {
 // 2. Conexión de WhatsApp
 async function iniciarWhatsApp() {
   estadoConexion = 'iniciando';
-  console.log('⏳ Iniciando conexión de WhatsApp...');
+  console.log('⏳ Iniciando WhatsApp Baileys...');
+  
   await restaurarSesionDesdeFirebase();
   const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
 
@@ -375,8 +416,8 @@ server.get('/', (req, res) => {
 
     ${estadoConexion === 'iniciando' || (estadoConexion !== 'conectado' && !ultimoQRDataURL) ? `
       <div style="text-align: center; padding: 20px 10px; background: #0f172a; border-radius: 12px; margin: 16px 0;">
-        <p style="margin: 0; font-size: 14px; color: #cbd5e1;">⏳ Conectando con WhatsApp...</p>
-        <p style="margin: 6px 0 0 0; font-size: 12px; color: #64748b;">La página se actualizará sola cuando aparezca el código QR.</p>
+        <p style="margin: 0; font-size: 14px; color: #cbd5e1;">⏳ Conectando con WhatsApp y restaurando sesión...</p>
+        <p style="margin: 6px 0 0 0; font-size: 12px; color: #64748b;">La página se actualizará automáticamente en unos segundos.</p>
       </div>
     ` : ''}
 
@@ -432,7 +473,6 @@ server.get('/', (req, res) => {
       alert('Asignado para Unidades Listas. Haz clic en \"Guardar Grupos\" para confirmar.');
     }
     ${estadoConexion !== 'conectado' ? `
-      // Auto-recargar cada 4 segundos mientras no esté conectado para mostrar el QR
       setTimeout(() => location.reload(), 4000);
     ` : ''}
   </script>
@@ -446,14 +486,15 @@ server.post('/toggle', (req, res) => {
   res.redirect('/');
 });
 
-server.post('/guardar-config', (req, res) => {
+server.post('/guardar-config', async (req, res) => {
   const { grupoIngresosId, grupoListasId } = req.body;
   config = {
     ...config,
     grupoIngresosId: (grupoIngresosId || '').trim(),
     grupoListasId: (grupoListasId || '').trim()
   };
-  guardarConfig(config);
+  guardarConfigLocal(config);
+  await guardarConfigEnFirebase(config);
   res.redirect('/');
 });
 
@@ -469,7 +510,9 @@ server.post('/logout', async (req, res) => {
 server.get('/health', (req, res) => res.send('OK'));
 
 const PORT = process.env.PORT || 3000;
-server.listen(PORT, () => {
+server.listen(PORT, async () => {
   console.log(`🌐 Servidor Web activo en el puerto ${PORT}`);
-  iniciarWhatsApp();
+  await autenticarFirebase();
+  await restaurarConfigDesdeFirebase();
+  await iniciarWhatsApp();
 });
