@@ -756,10 +756,9 @@ server.get('/group-info', async (req, res) => {
       ok: true,
       id: meta.id,
       subject: meta.subject,
-      participantsCount: meta.participants?.length,
-      isParticipant: meta.participants?.some(p => p.id.includes('5212311547844')),
-      announce: meta.announce, // true if only admins can send
-      restrict: meta.restrict
+      myUserId: socketWhatsApp?.user?.id,
+      myLid: socketWhatsApp?.user?.lid,
+      participants: meta.participants?.map(p => ({ id: p.id, admin: p.admin }))
     });
   } catch (e) {
     res.json({ ok: false, error: e.message });
