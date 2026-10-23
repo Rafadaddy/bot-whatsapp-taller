@@ -213,6 +213,8 @@ async function actualizarGrupos() {
 }
 
 // 2. Conexión de WhatsApp
+const mensajeStore = new Map();
+
 async function iniciarWhatsApp() {
   estadoConexion = 'iniciando';
   console.log('⏳ Iniciando WhatsApp Baileys...');
@@ -225,8 +227,17 @@ async function iniciarWhatsApp() {
     browser: Browsers.ubuntu('Chrome'),
     logger: pino({ level: 'silent' }),
     printQRInTerminal: false,
-    connectTimeoutMs: 60000,
-    defaultQueryTimeoutMs: 60000
+    connectTimeoutMs: 30000,
+    defaultQueryTimeoutMs: 30000,
+    keepAliveIntervalMs: 15000,
+    syncFullHistory: false,
+    markOnlineOnConnect: false,
+    getMessage: async (key) => {
+      if (key && key.id && mensajeStore.has(key.id)) {
+        return mensajeStore.get(key.id);
+      }
+      return { conversation: '' };
+    }
   });
 
   socketWhatsApp.ev.on('creds.update', async () => {
@@ -276,6 +287,14 @@ async function iniciarWhatsApp() {
       }
     }
   });
+
+  socketWhatsApp.ev.on('messages.update', (updates) => {
+    for (const update of updates) {
+      if (update.update?.status >= 2) {
+        console.log(`📬 Mensaje confirmado por WhatsApp (Status ${update.update.status}): ${update.key.id}`);
+      }
+    }
+  });
 }
 
 // Enviar mensajes a WhatsApp
@@ -283,26 +302,35 @@ async function enviarMensajeGrupo(grupoId, texto) {
   if (!botActivo) {
     console.log(`⏸️ [PAUSADO] El bot está en pausa. Mensaje no enviado: "${texto}"`);
     registrarActividad('pausa', `Bot pausado: ${texto}`, false);
-    return;
+    return false;
   }
   if (!socketWhatsApp || estadoConexion !== 'conectado') {
     console.warn(`[!] No se pudo enviar mensaje porque WhatsApp no está conectado.`);
     registrarActividad('error', `WhatsApp desconectado: ${texto}`, false);
-    return;
+    return false;
   }
   if (!grupoId || grupoId.trim() === '') {
     console.warn(`[!] Falta configurar el ID del grupo en la página de control.`);
     registrarActividad('error', `Sin grupo asignado: ${texto}`, false);
-    return;
+    return false;
   }
 
   try {
-    await socketWhatsApp.sendMessage(grupoId, { text: texto });
+    const res = await socketWhatsApp.sendMessage(grupoId, { text: texto });
+    if (res && res.key && res.key.id) {
+      mensajeStore.set(res.key.id, res.message);
+      if (mensajeStore.size > 200) {
+        const firstKey = mensajeStore.keys().next().value;
+        mensajeStore.delete(firstKey);
+      }
+    }
     console.log(`📨 [${new Date().toLocaleTimeString('es-MX')}] Enviado a ${grupoId}: "${texto}"`);
     registrarActividad('envio', texto, true);
+    return true;
   } catch (error) {
     console.error(`❌ Error al enviar mensaje:`, error.message);
     registrarActividad('error', `Error al enviar: ${error.message}`, false);
+    return false;
   }
 }
 
@@ -329,9 +357,12 @@ async function notificarIngresoSiAplica(docId, unit) {
   const mensaje = construirMensajeIngreso(unit, numUnidad);
   console.log(`\n🆕 [NUEVA UNIDAD] #${numUnidad} -> Enviando a WhatsApp...`);
   config = leerConfig();
-  await enviarMensajeGrupo(config.grupoIngresosId, mensaje);
-  await guardarNotificadoEnFirebase(clave);
-  return true;
+  const ok = await enviarMensajeGrupo(config.grupoIngresosId, mensaje);
+  if (ok) {
+    await guardarNotificadoEnFirebase(clave);
+    return true;
+  }
+  return false;
 }
 
 async function notificarListaSiAplica(docId, unit) {
@@ -342,9 +373,12 @@ async function notificarListaSiAplica(docId, unit) {
   const mensaje = `${numUnidad} lista`;
   console.log(`\n🎉 [UNIDAD LISTA] #${numUnidad} lista -> Enviando a WhatsApp...`);
   config = leerConfig();
-  await enviarMensajeGrupo(config.grupoListasId, mensaje);
-  await guardarNotificadoEnFirebase(clave);
-  return true;
+  const ok = await enviarMensajeGrupo(config.grupoListasId, mensaje);
+  if (ok) {
+    await guardarNotificadoEnFirebase(clave);
+    return true;
+  }
+  return false;
 }
 
 // 3. Listener en tiempo real de Firebase
@@ -556,6 +590,17 @@ server.get('/', (req, res) => {
 
     ${estadoConexion === 'conectado' ? `
       <p style="color: #10b981; font-size: 13px; text-align: center; margin: 10px 0;">✅ WhatsApp vinculado y listo para enviar mensajes.</p>
+      <div style="display: flex; gap: 6px; margin: 10px 0;">
+        <form action="/probar-ingresos" method="POST" style="flex: 1; margin: 0;">
+          <button type="submit" class="btn btn-save" style="font-size: 11px; padding: 8px 2px; margin: 0;">🧪 Probar Mecánicos</button>
+        </form>
+        <form action="/probar-listas" method="POST" style="flex: 1; margin: 0;">
+          <button type="submit" class="btn btn-save" style="font-size: 11px; padding: 8px 2px; margin: 0; background: #059669;">🧪 Probar Listas</button>
+        </form>
+        <form action="/reenviar-5599" method="POST" style="flex: 1; margin: 0;">
+          <button type="submit" class="btn btn-save" style="font-size: 11px; padding: 8px 2px; margin: 0; background: #d97706;">🔁 Reenviar 5599</button>
+        </form>
+      </div>
       <form action="/logout" method="POST" onsubmit="return confirm('¿Seguro que deseas desvincular el celular?');">
         <button type="submit" class="btn btn-danger">Desvincular WhatsApp / Cambiar Celular</button>
       </form>
@@ -684,8 +729,33 @@ server.post('/logout', async (req, res) => {
   res.redirect('/');
 });
 
-server.all(['/health', '/Health'], (req, res) => {
+server.post('/probar-ingresos', async (req, res) => {
+  config = leerConfig();
+  await enviarMensajeGrupo(config.grupoIngresosId, `🧪 Prueba de conexión - ${new Date().toLocaleTimeString('es-MX')}`);
+  res.redirect('/');
+});
+
+server.post('/probar-listas', async (req, res) => {
+  config = leerConfig();
+  await enviarMensajeGrupo(config.grupoListasId, `🧪 Prueba de conexión - ${new Date().toLocaleTimeString('es-MX')}`);
+  res.redirect('/');
+});
+
+server.post('/reenviar-5599', async (req, res) => {
+  config = leerConfig();
+  await enviarMensajeGrupo(config.grupoIngresosId, `*5599* CHECAR BANDA (RECHINA)`);
+  res.redirect('/');
+});
+
+server.all(['/health', '/Health'], async (req, res) => {
   registrarActividad('pulso', 'Pulso cron-job recibido', true);
+  if (socketWhatsApp && estadoConexion === 'conectado') {
+    try {
+      await socketWhatsApp.sendPresenceUpdate('available');
+    } catch (e) {
+      console.warn('⚠️ Ping de presencia falló:', e.message);
+    }
+  }
   res.status(200).type('text/plain').send('OK');
 });
 

@@ -5,7 +5,7 @@
   "main": "index.js",
   "type": "module",
   "scripts": {
-    "start": "node index.js"
+    "start": "node --max-old-space-size=384 index.js"
   },
   "dependencies": {
     "@whiskeysockets/baileys": "^6.7.24",
