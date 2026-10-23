@@ -11,7 +11,7 @@ import express from 'express';
 const require = createRequire(import.meta.url);
 const { initializeApp } = require('firebase/app');
 const { getAuth, signInWithEmailAndPassword } = require('firebase/auth');
-const { getFirestore, collection, onSnapshot, query, where, doc, getDoc, setDoc, deleteDoc } = require('firebase/firestore');
+const { getFirestore, collection, onSnapshot, query, where, doc, getDoc, getDocs, orderBy, limit, setDoc, deleteDoc } = require('firebase/firestore');
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -788,9 +788,20 @@ server.post('/probar-listas', async (req, res) => {
 });
 
 server.post('/reenviar-ultima', async (req, res) => {
-  if (ultimaUnidadIngreso && ultimaUnidadIngreso.mensaje) {
-    config = leerConfig();
-    await enviarMensajeGrupo(config.grupoIngresosId, ultimaUnidadIngreso.mensaje);
+  config = leerConfig();
+  try {
+    const qLatest = query(collection(firestore, 'units'), orderBy('created_date', 'desc'), limit(1));
+    const snapLatest = await getDocs(qLatest);
+    if (!snapLatest.empty) {
+      const unit = snapLatest.docs[0].data();
+      const numUnidad = unit.unit_number || 'S/N';
+      const msg = construirMensajeIngreso(unit, numUnidad);
+      ultimaUnidadIngreso = { numero: numUnidad, mensaje: msg };
+      console.log(`🔁 Reenviando última unidad #${numUnidad} a WhatsApp...`);
+      await enviarMensajeGrupo(config.grupoIngresosId, msg);
+    }
+  } catch (e) {
+    console.error('Error al reenviar última:', e.message);
   }
   res.redirect('/');
 });
