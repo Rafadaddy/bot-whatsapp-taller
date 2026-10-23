@@ -42,6 +42,17 @@ let gruposDetectados = [];
 let socketWhatsApp = null;
 let listenerIniciado = false;
 const estadosConocidos = new Map();
+let notifiedSet = new Set();
+let historialActividad = [];
+const MAX_HISTORIAL = 20;
+
+function registrarActividad(tipo, detalle, ok = true) {
+  const hora = new Date().toLocaleTimeString('es-MX', { timeZone: 'America/Mexico_City', hour12: false });
+  historialActividad.unshift({ hora, tipo, detalle, ok });
+  if (historialActividad.length > MAX_HISTORIAL) {
+    historialActividad.pop();
+  }
+}
 
 // Leer y guardar configuración local
 function leerConfig() {
@@ -98,6 +109,34 @@ async function guardarConfigEnFirebase(nuevaConfig) {
     console.log('💾 Grupos guardados permanentemente en Firebase.');
   } catch (e) {
     console.warn('Error al guardar config en Firebase:', e.message);
+  }
+}
+
+async function cargarNotificadosDesdeFirebase() {
+  try {
+    const snap = await getDoc(doc(firestore, '_system', 'whatsapp_notified'));
+    if (snap.exists()) {
+      const data = snap.data();
+      if (Array.isArray(data.items)) {
+        notifiedSet = new Set(data.items);
+        console.log(`📋 ${notifiedSet.size} notificaciones previas recordadas desde la nube.`);
+      }
+    }
+  } catch (e) {
+    console.warn('No se pudo cargar whatsapp_notified:', e.message);
+  }
+}
+
+async function guardarNotificadoEnFirebase(clave) {
+  notifiedSet.add(clave);
+  try {
+    const items = Array.from(notifiedSet).slice(-500);
+    await setDoc(doc(firestore, '_system', 'whatsapp_notified'), {
+      items,
+      updated_at: new Date().toISOString()
+    });
+  } catch (e) {
+    console.warn('Error al guardar notificado en Firebase:', e.message);
   }
 }
 
@@ -243,23 +282,69 @@ async function iniciarWhatsApp() {
 async function enviarMensajeGrupo(grupoId, texto) {
   if (!botActivo) {
     console.log(`⏸️ [PAUSADO] El bot está en pausa. Mensaje no enviado: "${texto}"`);
+    registrarActividad('pausa', `Bot pausado: ${texto}`, false);
     return;
   }
   if (!socketWhatsApp || estadoConexion !== 'conectado') {
     console.warn(`[!] No se pudo enviar mensaje porque WhatsApp no está conectado.`);
+    registrarActividad('error', `WhatsApp desconectado: ${texto}`, false);
     return;
   }
   if (!grupoId || grupoId.trim() === '') {
     console.warn(`[!] Falta configurar el ID del grupo en la página de control.`);
+    registrarActividad('error', `Sin grupo asignado: ${texto}`, false);
     return;
   }
 
   try {
     await socketWhatsApp.sendMessage(grupoId, { text: texto });
     console.log(`📨 [${new Date().toLocaleTimeString('es-MX')}] Enviado a ${grupoId}: "${texto}"`);
+    registrarActividad('envio', texto, true);
   } catch (error) {
     console.error(`❌ Error al enviar mensaje:`, error.message);
+    registrarActividad('error', `Error al enviar: ${error.message}`, false);
   }
+}
+
+function construirMensajeIngreso(unit, numUnidad) {
+  let fallasTexto = '';
+  if (Array.isArray(unit.faults) && unit.faults.length > 0) {
+    const listaFallas = unit.faults
+      .map(f => typeof f === 'string' ? f : (f.description || f.cause || ''))
+      .filter(Boolean);
+    if (listaFallas.length > 0) {
+      fallasTexto = ' ' + listaFallas.join(' // ');
+    }
+  } else if (unit.reported_fault) {
+    fallasTexto = ' ' + unit.reported_fault;
+  }
+  return `*${numUnidad}*${fallasTexto}`;
+}
+
+async function notificarIngresoSiAplica(docId, unit) {
+  const clave = docId + '_ingreso';
+  if (notifiedSet.has(clave)) return false;
+
+  const numUnidad = unit.unit_number || 'S/N';
+  const mensaje = construirMensajeIngreso(unit, numUnidad);
+  console.log(`\n🆕 [NUEVA UNIDAD] #${numUnidad} -> Enviando a WhatsApp...`);
+  config = leerConfig();
+  await enviarMensajeGrupo(config.grupoIngresosId, mensaje);
+  await guardarNotificadoEnFirebase(clave);
+  return true;
+}
+
+async function notificarListaSiAplica(docId, unit) {
+  const clave = docId + '_lista';
+  if (notifiedSet.has(clave)) return false;
+
+  const numUnidad = unit.unit_number || 'S/N';
+  const mensaje = `${numUnidad} lista`;
+  console.log(`\n🎉 [UNIDAD LISTA] #${numUnidad} lista -> Enviando a WhatsApp...`);
+  config = leerConfig();
+  await enviarMensajeGrupo(config.grupoListasId, mensaje);
+  await guardarNotificadoEnFirebase(clave);
+  return true;
 }
 
 // 3. Listener en tiempo real de Firebase
@@ -268,7 +353,10 @@ function iniciarListenerFirebase() {
   let esCargaInicial = true;
   const q = query(collection(firestore, 'units'), where('status', '!=', 'entregada'));
 
-  onSnapshot(q, (snapshot) => {
+  onSnapshot(q, async (snapshot) => {
+    const ahora = Date.now();
+    const limiteReciente = ahora - (45 * 60 * 1000); // Ventana de 45 minutos hacia atrás
+
     if (esCargaInicial) {
       snapshot.docs.forEach((docSnap) => {
         const data = docSnap.data();
@@ -278,45 +366,81 @@ function iniciarListenerFirebase() {
         });
       });
       esCargaInicial = false;
-      console.log(`⚡ Sincronización inicial: ${estadosConocidos.size} unidades registradas.`);
+      console.log(`⚡ Sincronización inicial: ${estadosConocidos.size} unidades en memoria.`);
+
+      // A) Marcar unidades viejas (> 45 min) como ya notificadas para evitar spam de días anteriores
+      let huboMarcadoViejo = false;
+      for (const docSnap of snapshot.docs) {
+        const docId = docSnap.id;
+        const unit = docSnap.data();
+        const fechaCreacion = unit.created_date ? new Date(unit.created_date).getTime() : 0;
+
+        if (fechaCreacion < limiteReciente && !notifiedSet.has(docId + '_ingreso')) {
+          notifiedSet.add(docId + '_ingreso');
+          huboMarcadoViejo = true;
+        }
+
+        if (unit.status === 'lista') {
+          const listaEvent = Array.isArray(unit.timeline) 
+            ? [...unit.timeline].reverse().find(t => t.status === 'lista') 
+            : null;
+          const fechaLista = listaEvent?.date ? new Date(listaEvent.date).getTime() : fechaCreacion;
+          if (fechaLista < limiteReciente && !notifiedSet.has(docId + '_lista')) {
+            notifiedSet.add(docId + '_lista');
+            huboMarcadoViejo = true;
+          }
+        }
+      }
+
+      if (huboMarcadoViejo) {
+        const items = Array.from(notifiedSet).slice(-500);
+        await setDoc(doc(firestore, '_system', 'whatsapp_notified'), {
+          items,
+          updated_at: new Date().toISOString()
+        }).catch(() => {});
+      }
+
+      // B) RECUPERACIÓN AUTOMÁTICA: Si alguna unidad se creó o quedó lista en los últimos 45 min
+      // (por ejemplo mientras el servidor Render dormía o se reiniciaba) y no se había notificado,
+      // enviarla de inmediato para no perder ninguna unidad.
+      for (const docSnap of snapshot.docs) {
+        const docId = docSnap.id;
+        const unit = docSnap.data();
+        const fechaCreacion = unit.created_date ? new Date(unit.created_date).getTime() : 0;
+
+        if (fechaCreacion >= limiteReciente && !notifiedSet.has(docId + '_ingreso')) {
+          console.log(`⚡ Recuperando unidad reciente #${unit.unit_number || 'S/N'} creada mientras dormía...`);
+          await notificarIngresoSiAplica(docId, unit);
+        }
+
+        if (unit.status === 'lista' && !notifiedSet.has(docId + '_lista')) {
+          const listaEvent = Array.isArray(unit.timeline) 
+            ? [...unit.timeline].reverse().find(t => t.status === 'lista') 
+            : null;
+          const fechaLista = listaEvent?.date ? new Date(listaEvent.date).getTime() : fechaCreacion;
+          if (fechaLista >= limiteReciente) {
+            console.log(`⚡ Recuperando unidad terminada #${unit.unit_number || 'S/N'} lista mientras dormía...`);
+            await notificarListaSiAplica(docId, unit);
+          }
+        }
+      }
       return;
     }
 
+    // EVENTOS EN TIEMPO REAL
     const changes = snapshot.docChanges();
-    changes.forEach(async (change) => {
+    for (const change of changes) {
       const docId = change.doc.id;
       const unit = change.doc.data();
       const numUnidad = unit.unit_number || 'S/N';
-      config = leerConfig();
 
       // NUEVA UNIDAD
       if (change.type === 'added') {
-        const yaExiste = estadosConocidos.has(docId);
         estadosConocidos.set(docId, {
           status: unit.status,
           unit_number: numUnidad
         });
-
-        if (!yaExiste) {
-          const fechaCreacion = unit.created_date ? new Date(unit.created_date).getTime() : Date.now();
-          if (fechaCreacion >= (BOT_START_TIMESTAMP - 30000)) {
-            let fallasTexto = '';
-            if (Array.isArray(unit.faults) && unit.faults.length > 0) {
-              const listaFallas = unit.faults
-                .map(f => typeof f === 'string' ? f : (f.description || f.cause || ''))
-                .filter(Boolean);
-              if (listaFallas.length > 0) {
-                fallasTexto = ' ' + listaFallas.join(' // ');
-              }
-            } else if (unit.reported_fault) {
-              fallasTexto = ' ' + unit.reported_fault;
-            }
-
-            const mensaje = `*${numUnidad}*${fallasTexto}`;
-            console.log(`\n🆕 [NUEVA UNIDAD] Enviando al grupo...`);
-            await enviarMensajeGrupo(config.grupoIngresosId, mensaje);
-          }
-        }
+        await notificarIngresoSiAplica(docId, unit);
       }
 
       // CAMBIO DE ESTATUS
@@ -331,18 +455,17 @@ function iniciarListenerFirebase() {
         });
 
         if (estatusActual === 'lista' && estatusAnterior !== 'lista') {
-          const mensaje = `${numUnidad} lista`;
-          console.log(`\n🎉 [UNIDAD LISTA] Unidad #${numUnidad} lista.`);
-          await enviarMensajeGrupo(config.grupoListasId, mensaje);
+          await notificarListaSiAplica(docId, unit);
         }
       }
 
       if (change.type === 'removed') {
         estadosConocidos.delete(docId);
       }
-    });
+    }
   }, (error) => {
     console.error('Error en listener de Firebase:', error.message);
+    registrarActividad('error', `Listener DB: ${error.message}`, false);
   });
 }
 
@@ -437,6 +560,30 @@ server.get('/', (req, res) => {
         <button type="submit" class="btn btn-danger">Desvincular WhatsApp / Cambiar Celular</button>
       </form>
     ` : ''}
+  </div>
+
+  <div class="card">
+    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
+      <h2 style="font-size: 15px; margin: 0;">🕒 Actividad Reciente en Vivo:</h2>
+      <span style="font-size: 11px; color: #94a3b8;">Últimos eventos</span>
+    </div>
+    ${historialActividad.length === 0 ? `
+      <p style="font-size: 12px; color: #64748b; margin: 0; text-align: center; padding: 12px;">Esperando eventos de unidades o pulsos del despertador...</p>
+    ` : `
+      <div style="display: flex; flex-direction: column; gap: 8px;">
+        ${historialActividad.map(ev => `
+          <div style="background: #0f172a; padding: 8px 12px; border-radius: 8px; font-size: 12px; display: flex; justify-content: space-between; align-items: center; border-left: 3px solid ${ev.ok ? '#10b981' : '#ef4444'};">
+            <div style="overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-right: 8px;">
+              <span style="color: #94a3b8; font-family: monospace; font-size: 11px; margin-right: 6px;">[${ev.hora}]</span>
+              <span style="color: ${ev.ok ? '#f1f5f9' : '#f87171'}; font-weight: 500;">${ev.detalle}</span>
+            </div>
+            <span style="font-size: 10px; padding: 2px 6px; border-radius: 4px; background: ${ev.ok ? '#065f46' : '#7f1d1d'}; color: white; white-space: nowrap;">
+              ${ev.tipo.toUpperCase()}
+            </span>
+          </div>
+        `).join('')}
+      </div>
+    `}
   </div>
 
   <div class="card">
@@ -537,12 +684,16 @@ server.post('/logout', async (req, res) => {
   res.redirect('/');
 });
 
-server.get('/health', (req, res) => res.send('OK'));
+server.all(['/health', '/Health'], (req, res) => {
+  registrarActividad('pulso', 'Pulso cron-job recibido', true);
+  res.status(200).type('text/plain').send('OK');
+});
 
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, async () => {
   console.log(`🌐 Servidor Web activo en el puerto ${PORT}`);
   await autenticarFirebase();
   await restaurarConfigDesdeFirebase();
+  await cargarNotificadosDesdeFirebase();
   await iniciarWhatsApp();
 });
