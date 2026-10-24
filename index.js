@@ -45,8 +45,104 @@ const estadosConocidos = new Map();
 let notifiedSet = new Set();
 let historialActividad = [];
 const MAX_HISTORIAL = 20;
-let ultimaUnidadIngreso = { numero: '5599', mensaje: '*5599* CHECAR BANDA (RECHINA)' };
-let ultimaUnidadLista = { numero: '3608', mensaje: '3608 lista' };
+let ultimaUnidadIngreso = { numero: '', mensaje: '' };
+let ultimaUnidadLista = { numero: '', mensaje: '' };
+let colaPendientes = [];
+
+function esperarConexion(timeoutMs = 15000) {
+  if (socketWhatsApp && estadoConexion === 'conectado') {
+    return Promise.resolve(true);
+  }
+  return new Promise((resolve) => {
+    const startTime = Date.now();
+    const interval = setInterval(() => {
+      if (socketWhatsApp && estadoConexion === 'conectado') {
+        clearInterval(interval);
+        resolve(true);
+      } else if (Date.now() - startTime > timeoutMs) {
+        clearInterval(interval);
+        resolve(false);
+      }
+    }, 500);
+  });
+}
+
+function encolarPendiente(item) {
+  if (!colaPendientes.some(p => p.clave === item.clave)) {
+    console.log(`📥 Guardando en cola pendiente para reintentar al reconectar: "${item.texto}"`);
+    registrarActividad('espera', `En cola: ${item.texto}`, false);
+    colaPendientes.push(item);
+  }
+}
+
+async function procesarColaPendientes() {
+  if (colaPendientes.length === 0 || estadoConexion !== 'conectado') return;
+  console.log(`📋 Procesando ${colaPendientes.length} mensaje(s) pendiente(s) en cola...`);
+  const pendientes = [...colaPendientes];
+  colaPendientes = [];
+  for (const item of pendientes) {
+    try {
+      console.log(`🚀 Despachando mensaje retenido de cola: "${item.texto}"`);
+      const ok = await enviarMensajeGrupo(item.grupoId, item.texto);
+      if (ok) {
+        await guardarNotificadoEnFirebase(item.clave);
+      } else {
+        colaPendientes.push(item);
+      }
+    } catch (e) {
+      console.error('Error al procesar mensaje de cola:', e.message);
+      colaPendientes.push(item);
+    }
+  }
+}
+
+async function actualizarUltimaUnidad(tipo, info) {
+  if (tipo === 'ingreso') ultimaUnidadIngreso = info;
+  if (tipo === 'lista') ultimaUnidadLista = info;
+  try {
+    await setDoc(doc(firestore, '_system', 'whatsapp_config'), {
+      ...config,
+      ultimaUnidadIngreso,
+      ultimaUnidadLista
+    }, { merge: true });
+  } catch (e) {}
+}
+
+async function inicializarUltimasUnidades() {
+  try {
+    const qIngresos = query(collection(firestore, 'units'), orderBy('created_date', 'desc'), limit(1));
+    const snapIngreso = await getDocs(qIngresos);
+    if (!snapIngreso.empty) {
+      const u = snapIngreso.docs[0].data();
+      const num = u.unit_number || 'S/N';
+      ultimaUnidadIngreso = { numero: num, mensaje: construirMensajeIngreso(u, num) };
+    }
+
+    const qListas = query(collection(firestore, 'units'), orderBy('created_date', 'desc'), limit(50));
+    const snapListas = await getDocs(qListas);
+    let unitsWithLista = [];
+    for (const d of snapListas.docs) {
+      const u = d.data();
+      let fechaLista = 0;
+      if (Array.isArray(u.timeline)) {
+        const tLista = [...u.timeline].reverse().find(t => t.status === 'lista');
+        if (tLista && tLista.date) fechaLista = new Date(tLista.date).getTime();
+      }
+      if (u.status === 'lista' && !fechaLista) {
+        fechaLista = u.updated_date ? new Date(u.updated_date).getTime() : (u.created_date ? new Date(u.created_date).getTime() : 0);
+      }
+      if (fechaLista > 0) unitsWithLista.push({ unit: u, fechaLista });
+    }
+    unitsWithLista.sort((a, b) => b.fechaLista - a.fechaLista);
+    if (unitsWithLista.length > 0) {
+      const num = unitsWithLista[0].unit.unit_number || 'S/N';
+      ultimaUnidadLista = { numero: num, mensaje: `${num} lista` };
+    }
+    console.log(`📌 Unidades para reenvío listas: Ingreso #${ultimaUnidadIngreso.numero}, Lista #${ultimaUnidadLista.numero}`);
+  } catch (e) {
+    console.warn('Error al inicializar últimas unidades:', e.message);
+  }
+}
 
 function registrarActividad(tipo, detalle, ok = true) {
   const hora = new Date().toLocaleTimeString('es-MX', { timeZone: 'America/Mexico_City', hour12: false });
@@ -265,6 +361,7 @@ async function iniciarWhatsApp() {
 
       // Esperar 5 segundos a que el handshake y la sincronización se estabilicen
       setTimeout(actualizarGrupos, 5000);
+      setTimeout(procesarColaPendientes, 6000);
 
       if (!listenerIniciado) {
         setTimeout(() => {
@@ -309,11 +406,18 @@ async function enviarMensajeGrupo(grupoId, texto) {
     registrarActividad('pausa', `Bot pausado: ${texto}`, false);
     return false;
   }
+
+  // Si WhatsApp se está reconectando en ese instante, esperar hasta 15 segundos
   if (!socketWhatsApp || estadoConexion !== 'conectado') {
-    console.warn(`[!] No se pudo enviar mensaje porque WhatsApp no está conectado.`);
-    registrarActividad('error', `WhatsApp desconectado: ${texto}`, false);
-    return false;
+    console.log(`⏳ WhatsApp reconectando (${estadoConexion}). Esperando hasta 15s para enviar: "${texto}"...`);
+    const listo = await esperarConexion(15000);
+    if (!listo) {
+      console.warn(`[!] No se pudo enviar mensaje porque WhatsApp no reconectó a tiempo.`);
+      registrarActividad('error', `WhatsApp desconectado: ${texto}`, false);
+      return false;
+    }
   }
+
   if (!grupoId || grupoId.trim() === '') {
     console.warn(`[!] Falta configurar el ID del grupo en la página de control.`);
     registrarActividad('error', `Sin grupo asignado: ${texto}`, false);
@@ -360,15 +464,21 @@ async function notificarIngresoSiAplica(docId, unit) {
 
   const numUnidad = unit.unit_number || 'S/N';
   const mensaje = construirMensajeIngreso(unit, numUnidad);
-  ultimaUnidadIngreso = { numero: numUnidad, mensaje };
+  actualizarUltimaUnidad('ingreso', { numero: numUnidad, mensaje });
   console.log(`\n🆕 [NUEVA UNIDAD] #${numUnidad} -> Enviando a WhatsApp...`);
   config = leerConfig();
   const ok = await enviarMensajeGrupo(config.grupoIngresosId, mensaje);
   if (ok) {
     await guardarNotificadoEnFirebase(clave);
     return true;
+  } else {
+    encolarPendiente({
+      grupoId: config.grupoIngresosId,
+      texto: mensaje,
+      clave
+    });
+    return false;
   }
-  return false;
 }
 
 async function notificarListaSiAplica(docId, unit) {
@@ -377,15 +487,21 @@ async function notificarListaSiAplica(docId, unit) {
 
   const numUnidad = unit.unit_number || 'S/N';
   const mensaje = `${numUnidad} lista`;
-  ultimaUnidadLista = { numero: numUnidad, mensaje };
+  actualizarUltimaUnidad('lista', { numero: numUnidad, mensaje });
   console.log(`\n🎉 [UNIDAD LISTA] #${numUnidad} lista -> Enviando a WhatsApp...`);
   config = leerConfig();
   const ok = await enviarMensajeGrupo(config.grupoListasId, mensaje);
   if (ok) {
     await guardarNotificadoEnFirebase(clave);
     return true;
+  } else {
+    encolarPendiente({
+      grupoId: config.grupoListasId,
+      texto: mensaje,
+      clave
+    });
+    return false;
   }
-  return false;
 }
 
 // 3. Listener en tiempo real de Firebase
@@ -830,20 +946,26 @@ server.post('/reenviar-ultima', async (req, res) => {
 server.post('/reenviar-ultima-lista', async (req, res) => {
   config = leerConfig();
   try {
-    const qLatest = query(collection(firestore, 'units'), orderBy('created_date', 'desc'), limit(30));
+    const qLatest = query(collection(firestore, 'units'), orderBy('created_date', 'desc'), limit(50));
     const snapLatest = await getDocs(qLatest);
-    let targetUnit = null;
+    let unitsWithLista = [];
     for (const d of snapLatest.docs) {
       const u = d.data();
-      const hasLista = u.status === 'lista' || (Array.isArray(u.timeline) && u.timeline.some(t => t.status === 'lista'));
-      if (hasLista) {
-        targetUnit = u;
-        break;
+      let fechaLista = 0;
+      if (Array.isArray(u.timeline)) {
+        const tLista = [...u.timeline].reverse().find(t => t.status === 'lista');
+        if (tLista && tLista.date) fechaLista = new Date(tLista.date).getTime();
       }
+      if (u.status === 'lista' && !fechaLista) {
+        fechaLista = u.updated_date ? new Date(u.updated_date).getTime() : (u.created_date ? new Date(u.created_date).getTime() : 0);
+      }
+      if (fechaLista > 0) unitsWithLista.push({ unit: u, fechaLista });
     }
-    const num = targetUnit ? (targetUnit.unit_number || 'S/N') : (ultimaUnidadLista.numero || '3608');
+    unitsWithLista.sort((a, b) => b.fechaLista - a.fechaLista);
+    const targetUnit = unitsWithLista.length > 0 ? unitsWithLista[0].unit : null;
+    const num = targetUnit ? (targetUnit.unit_number || 'S/N') : (ultimaUnidadLista.numero || 'S/N');
     const msg = `${num} lista`;
-    ultimaUnidadLista = { numero: num, mensaje: msg };
+    actualizarUltimaUnidad('lista', { numero: num, mensaje: msg });
     console.log(`🔁 Reenviando última lista #${num} a WhatsApp...`);
     await enviarMensajeGrupo(config.grupoListasId, msg);
   } catch (e) {
@@ -880,5 +1002,6 @@ server.listen(PORT, async () => {
   await autenticarFirebase();
   await restaurarConfigDesdeFirebase();
   await cargarNotificadosDesdeFirebase();
+  await inicializarUltimasUnidades();
   await iniciarWhatsApp();
 });
