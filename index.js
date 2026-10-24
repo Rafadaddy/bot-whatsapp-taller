@@ -46,6 +46,7 @@ let notifiedSet = new Set();
 let historialActividad = [];
 const MAX_HISTORIAL = 20;
 let ultimaUnidadIngreso = { numero: '5599', mensaje: '*5599* CHECAR BANDA (RECHINA)' };
+let ultimaUnidadLista = { numero: '3608', mensaje: '3608 lista' };
 
 function registrarActividad(tipo, detalle, ok = true) {
   const hora = new Date().toLocaleTimeString('es-MX', { timeZone: 'America/Mexico_City', hour12: false });
@@ -230,7 +231,7 @@ async function iniciarWhatsApp() {
     printQRInTerminal: false,
     connectTimeoutMs: 30000,
     defaultQueryTimeoutMs: 30000,
-    keepAliveIntervalMs: 15000,
+    keepAliveIntervalMs: 30000,
     syncFullHistory: false,
     markOnlineOnConnect: false,
     getMessage: async (key) => {
@@ -262,13 +263,16 @@ async function iniciarWhatsApp() {
       console.log('✅ ¡WHATSAPP CONECTADO EXITOSAMENTE!');
       await respaldarSesionAFirebase();
 
-      // Esperar 3 segundos para que WhatsApp termine de sincronizar chats antes de consultar grupos
-      setTimeout(actualizarGrupos, 3000);
-      setTimeout(actualizarGrupos, 8000);
+      // Esperar 5 segundos a que el handshake y la sincronización se estabilicen
+      setTimeout(actualizarGrupos, 5000);
 
       if (!listenerIniciado) {
-        iniciarListenerFirebase();
-        listenerIniciado = true;
+        setTimeout(() => {
+          if (!listenerIniciado && estadoConexion === 'conectado') {
+            iniciarListenerFirebase();
+            listenerIniciado = true;
+          }
+        }, 5000);
       }
     }
 
@@ -373,6 +377,7 @@ async function notificarListaSiAplica(docId, unit) {
 
   const numUnidad = unit.unit_number || 'S/N';
   const mensaje = `${numUnidad} lista`;
+  ultimaUnidadLista = { numero: numUnidad, mensaje };
   console.log(`\n🎉 [UNIDAD LISTA] #${numUnidad} lista -> Enviando a WhatsApp...`);
   config = leerConfig();
   const ok = await enviarMensajeGrupo(config.grupoListasId, mensaje);
@@ -592,17 +597,33 @@ server.get('/', (req, res) => {
 
     ${estadoConexion === 'conectado' ? `
       <p style="color: #10b981; font-size: 13px; text-align: center; margin: 10px 0;">✅ WhatsApp vinculado y listo para enviar mensajes.</p>
-      <div style="display: flex; gap: 6px; margin: 10px 0;">
-        <form action="/probar-ingresos" method="POST" style="flex: 1; margin: 0;">
-          <button type="submit" class="btn btn-save" style="font-size: 11px; padding: 8px 2px; margin: 0;">🧪 Probar Mecánicos</button>
+      <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin: 10px 0;">
+        <form action="/probar-ingresos" method="POST" style="margin: 0;">
+          <button type="submit" class="btn btn-save" style="font-size: 11px; padding: 10px 2px; margin: 0; background: #2563eb;">🧪 Probar Mecánicos</button>
         </form>
-        <form action="/probar-listas" method="POST" style="flex: 1; margin: 0;">
-          <button type="submit" class="btn btn-save" style="font-size: 11px; padding: 8px 2px; margin: 0; background: #059669;">🧪 Probar Listas</button>
+        <form action="/probar-listas" method="POST" style="margin: 0;">
+          <button type="submit" class="btn btn-save" style="font-size: 11px; padding: 10px 2px; margin: 0; background: #059669;">🧪 Probar Listas</button>
         </form>
-        <form action="/reenviar-ultima" method="POST" style="flex: 1; margin: 0;">
-          <button type="submit" class="btn btn-save" style="font-size: 11px; padding: 8px 2px; margin: 0; background: #d97706;">🔁 Reenviar última ${ultimaUnidadIngreso.numero ? `(#${ultimaUnidadIngreso.numero})` : ''}</button>
+        <form action="/reenviar-ultima" method="POST" style="margin: 0;">
+          <button type="submit" class="btn btn-save" style="font-size: 11px; padding: 10px 2px; margin: 0; background: #d97706;">🔁 Reenviar Ingreso ${ultimaUnidadIngreso.numero ? `(#${ultimaUnidadIngreso.numero})` : ''}</button>
+        </form>
+        <form action="/reenviar-ultima-lista" method="POST" style="margin: 0;">
+          <button type="submit" class="btn btn-save" style="font-size: 11px; padding: 10px 2px; margin: 0; background: #0d9488;">🔁 Reenviar Lista ${ultimaUnidadLista.numero ? `(#${ultimaUnidadLista.numero})` : ''}</button>
         </form>
       </div>
+
+      <form action="/enviar-directo" method="POST" style="margin: 10px 0; background: #0f172a; padding: 10px; border-radius: 8px; border: 1px solid #334155;">
+        <label style="font-size: 11px; margin-bottom: 6px; display: block; color: #94a3b8;">💬 Enviar mensaje directo:</label>
+        <div style="display: flex; gap: 6px;">
+          <select name="destino" style="background: #1e293b; color: white; border: 1px solid #334155; border-radius: 6px; padding: 6px; font-size: 11px;">
+            <option value="listas">Unidades Listas</option>
+            <option value="ingresos">Mecánicos (Ingreso)</option>
+          </select>
+          <input type="text" name="texto" placeholder="Ej: 3608 lista" style="flex: 1; padding: 6px 10px; font-size: 12px; background: #1e293b; border: 1px solid #334155; border-radius: 6px; color: white;" required />
+          <button type="submit" class="btn-assign btn-green" style="font-size: 11px; padding: 6px 12px;">Enviar</button>
+        </div>
+      </form>
+
       <form action="/logout" method="POST" onsubmit="return confirm('¿Seguro que deseas desvincular el celular?');">
         <button type="submit" class="btn btn-danger">Desvincular WhatsApp / Cambiar Celular</button>
       </form>
@@ -697,7 +718,7 @@ server.get('/', (req, res) => {
 
     // Mantener activo el servidor en Render si esta página está abierta en la PC o celular
     setInterval(() => {
-      fetch('/health').catch(() => {});
+      fetch('/health?from=browser').catch(() => {});
     }, 60000);
   </script>
 </body>
@@ -806,15 +827,46 @@ server.post('/reenviar-ultima', async (req, res) => {
   res.redirect('/');
 });
 
-server.all(['/health', '/Health'], async (req, res) => {
-  registrarActividad('pulso', 'Pulso cron-job recibido', true);
-  if (socketWhatsApp && estadoConexion === 'conectado') {
-    try {
-      await socketWhatsApp.sendPresenceUpdate('available');
-    } catch (e) {
-      console.warn('⚠️ Ping de presencia falló:', e.message);
+server.post('/reenviar-ultima-lista', async (req, res) => {
+  config = leerConfig();
+  try {
+    const qLatest = query(collection(firestore, 'units'), orderBy('created_date', 'desc'), limit(30));
+    const snapLatest = await getDocs(qLatest);
+    let targetUnit = null;
+    for (const d of snapLatest.docs) {
+      const u = d.data();
+      const hasLista = u.status === 'lista' || (Array.isArray(u.timeline) && u.timeline.some(t => t.status === 'lista'));
+      if (hasLista) {
+        targetUnit = u;
+        break;
+      }
     }
+    const num = targetUnit ? (targetUnit.unit_number || 'S/N') : (ultimaUnidadLista.numero || '3608');
+    const msg = `${num} lista`;
+    ultimaUnidadLista = { numero: num, mensaje: msg };
+    console.log(`🔁 Reenviando última lista #${num} a WhatsApp...`);
+    await enviarMensajeGrupo(config.grupoListasId, msg);
+  } catch (e) {
+    console.error('Error al reenviar última lista:', e.message);
   }
+  res.redirect('/');
+});
+
+server.post('/enviar-directo', async (req, res) => {
+  config = leerConfig();
+  const { destino, texto } = req.body;
+  if (texto && texto.trim()) {
+    const targetGroup = destino === 'ingresos' ? config.grupoIngresosId : config.grupoListasId;
+    console.log(`💬 Enviando mensaje directo manual: "${texto.trim()}"`);
+    await enviarMensajeGrupo(targetGroup, texto.trim());
+  }
+  res.redirect('/');
+});
+
+server.all(['/health', '/Health'], async (req, res) => {
+  const ua = (req.headers['user-agent'] || '').toLowerCase();
+  const origen = req.query.from === 'browser' ? 'Navegador Web' : (ua.includes('cron-job') ? 'cron-job.org' : 'Despertador externo');
+  registrarActividad('pulso', `Pulso (${origen})`, true);
   res.status(200).type('text/plain').send('OK');
 });
 
