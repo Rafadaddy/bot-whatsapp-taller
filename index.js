@@ -865,7 +865,11 @@ server.post('/enviar-directo', async (req, res) => {
 
 server.all(['/health', '/Health'], async (req, res) => {
   const ua = (req.headers['user-agent'] || '').toLowerCase();
-  const origen = req.query.from === 'browser' ? 'Navegador Web' : (ua.includes('cron-job') ? 'cron-job.org' : 'Despertador externo');
+  let origen = 'Despertador externo';
+  if (req.query.from === 'browser') origen = 'Navegador Web';
+  else if (ua.includes('uptimerobot')) origen = 'UptimeRobot';
+  else if (ua.includes('cron-job')) origen = 'cron-job.org';
+
   registrarActividad('pulso', `Pulso (${origen})`, true);
   res.status(200).type('text/plain').send('OK');
 });
