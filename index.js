@@ -35,7 +35,9 @@ const firestore = getFirestore(app);
 
 // Estado en memoria
 const BOT_START_TIMESTAMP = Date.now();
-let botActivo = true;
+let modoHorarioAutomatico = true;
+let forzadoManual = null; // null = horario automático; true = manual encendido; false = manual pausa
+let botActivo = false;
 let estadoConexion = 'iniciando'; // 'iniciando', 'esperando_qr', 'conectado', 'desconectado'
 let ultimoQRDataURL = null;
 let gruposDetectados = [];
@@ -48,6 +50,79 @@ const MAX_HISTORIAL = 20;
 let ultimaUnidadIngreso = { numero: '', mensaje: '' };
 let ultimaUnidadLista = { numero: '', mensaje: '' };
 let colaPendientes = [];
+
+function obtenerFechaHoraMexico() {
+  const ahora = new Date();
+  const formato = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/Mexico_City',
+    hour12: false,
+    weekday: 'short',
+    hour: 'numeric',
+    minute: 'numeric',
+    second: 'numeric'
+  }).formatToParts(ahora);
+
+  const parts = {};
+  for (const p of formato) {
+    parts[p.type] = p.value;
+  }
+  
+  const diaSemanaMap = { 'Sun': 0, 'Mon': 1, 'Tue': 2, 'Wed': 3, 'Thu': 4, 'Fri': 5, 'Sat': 6 };
+  const diaSemana = diaSemanaMap[parts.weekday] ?? ahora.getDay();
+  const hora = parseInt(parts.hour, 10);
+  const minuto = parseInt(parts.minute, 10);
+
+  return { diaSemana, hora, minuto };
+}
+
+function estaEnHorarioLaboral() {
+  const { diaSemana, hora, minuto } = obtenerFechaHoraMexico();
+  const tiempoMinutos = hora * 60 + minuto;
+  const inicioMinutos = 9 * 60; // 9:00 AM (540 min)
+
+  // Lunes a Viernes (1 a 5): 9:00 AM a 8:00 PM (20:00 = 1200 min)
+  if (diaSemana >= 1 && diaSemana <= 5) {
+    const finMinutos = 20 * 60;
+    return tiempoMinutos >= inicioMinutos && tiempoMinutos < finMinutos;
+  }
+  
+  // Sábado y Domingo (6 y 0): 9:00 AM a 5:00 PM (17:00 = 1020 min)
+  if (diaSemana === 6 || diaSemana === 0) {
+    const finMinutos = 17 * 60;
+    return tiempoMinutos >= inicioMinutos && tiempoMinutos < finMinutos;
+  }
+
+  return false;
+}
+
+function actualizarEstadoHorario(notificarCambio = false) {
+  if (!modoHorarioAutomatico) {
+    botActivo = forzadoManual !== false;
+    return;
+  }
+
+  const dentroDeHorario = estaEnHorarioLaboral();
+  const estadoAnterior = botActivo;
+  botActivo = dentroDeHorario;
+
+  if (notificarCambio && estadoAnterior !== botActivo) {
+    if (botActivo) {
+      console.log('⏰ [HORARIO] Inicio de turno laboral. Bot activado automáticamente.');
+      registrarActividad('horario', 'Inicio de turno: Bot activado automáticamente', true);
+    } else {
+      console.log('⏰ [HORARIO] Fin de turno laboral. Bot pausado automáticamente.');
+      registrarActividad('horario', 'Fin de turno: Bot pausado automáticamente', false);
+    }
+  }
+}
+
+// Inicializar el estado de horario al cargar el módulo
+actualizarEstadoHorario(false);
+
+// Chequeo periódico cada 30 segundos
+setInterval(() => {
+  actualizarEstadoHorario(true);
+}, 30000);
 
 function esperarConexion(timeoutMs = 15000) {
   if (socketWhatsApp && estadoConexion === 'conectado') {
@@ -193,12 +268,27 @@ async function restaurarConfigDesdeFirebase() {
         grupoIngresosId: data.grupoIngresosId || config.grupoIngresosId || '',
         grupoListasId: data.grupoListasId || config.grupoListasId || ''
       };
+      if (typeof data.modoHorarioAutomatico === 'boolean') modoHorarioAutomatico = data.modoHorarioAutomatico;
+      if (data.forzadoManual !== undefined) forzadoManual = data.forzadoManual;
+      if (data.ultimaUnidadIngreso) ultimaUnidadIngreso = data.ultimaUnidadIngreso;
+      if (data.ultimaUnidadLista) ultimaUnidadLista = data.ultimaUnidadLista;
       guardarConfigLocal(config);
-      console.log('🎯 Configuración de grupos restaurada desde la nube:', config);
+      actualizarEstadoHorario(false);
+      console.log('🎯 Configuración y horario restaurados desde la nube:', config);
     }
   } catch (e) {
     console.warn('No se pudo restaurar config desde Firebase:', e.message);
   }
+}
+
+async function guardarEstadoHorarioEnFirebase() {
+  try {
+    await setDoc(doc(firestore, '_system', 'whatsapp_config'), {
+      ...config,
+      modoHorarioAutomatico,
+      forzadoManual
+    }, { merge: true });
+  } catch (e) {}
 }
 
 async function guardarConfigEnFirebase(nuevaConfig) {
@@ -687,13 +777,42 @@ server.get('/', (req, res) => {
       </span>
     </h1>
 
-    <div style="margin: 14px 0;">
-      <label>ESTADO DEL SERVICIO:</label>
-      <form action="/toggle" method="POST">
-        <button type="submit" class="btn ${botActivo ? 'btn-toggle-on' : 'btn-toggle-off'}">
-          ${botActivo ? '🟢 BOT ACTIVO (Toca para pausar)' : '⏸️ BOT EN PAUSA (Toca para activar)'}
-        </button>
-      </form>
+    <div style="margin: 14px 0; background: #0f172a; padding: 14px; border-radius: 12px; border: 1px solid #334155;">
+      <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+        <span style="font-size: 13px; font-weight: bold; color: #94a3b8;">CONTROL DE HORARIO:</span>
+        <span style="font-size: 11px; padding: 3px 8px; border-radius: 12px; background: ${modoHorarioAutomatico ? '#065f46' : '#854d0e'}; color: white; font-weight: bold;">
+          ${modoHorarioAutomatico ? '🕒 Horario Automático' : '👤 Modo Manual'}
+        </span>
+      </div>
+
+      <div style="font-size: 12px; color: #cbd5e1; margin-bottom: 12px; line-height: 1.5;">
+        📅 <b>Lunes a Viernes:</b> 9:00 AM – 8:00 PM<br/>
+        📅 <b>Sábado y Domingo:</b> 9:00 AM – 5:00 PM<br/>
+        <div style="margin-top: 6px; font-weight: bold;">
+          ${modoHorarioAutomatico ? (
+            botActivo 
+              ? '<span style="color: #34d399;">🟢 Dentro de turno laboral (Enviando mensajes)</span>'
+              : '<span style="color: #fbbf24;">⏸️ Fuera de turno laboral (En pausa automática)</span>'
+          ) : (
+            botActivo
+              ? '<span style="color: #34d399;">🟢 FORZADO ACTIVO (Manual)</span>'
+              : '<span style="color: #f87171;">⏸️ FORZADO EN PAUSA (Manual)</span>'
+          )}
+        </div>
+      </div>
+
+      <div style="display: flex; gap: 8px;">
+        <form action="/toggle-horario" method="POST" style="flex: 1; margin: 0;">
+          <button type="submit" class="btn" style="background: ${modoHorarioAutomatico ? '#334155' : '#059669'}; font-size: 12px; padding: 10px 4px; margin: 0;">
+            ${modoHorarioAutomatico ? 'Cambiar a Manual' : 'Usar Horario Automático'}
+          </button>
+        </form>
+        <form action="/toggle" method="POST" style="flex: 1; margin: 0;">
+          <button type="submit" class="btn ${botActivo ? 'btn-toggle-on' : 'btn-toggle-off'}" style="font-size: 12px; padding: 10px 4px; margin: 0;">
+            ${botActivo ? 'Pausar Bot' : 'Activar Bot'}
+          </button>
+        </form>
+      </div>
     </div>
 
     ${estadoConexion === 'esperando_qr' && ultimoQRDataURL ? `
@@ -847,8 +966,31 @@ server.post('/cargar-grupos', async (req, res) => {
   res.redirect('/');
 });
 
-server.post('/toggle', (req, res) => {
-  botActivo = !botActivo;
+server.post('/toggle-horario', async (req, res) => {
+  modoHorarioAutomatico = !modoHorarioAutomatico;
+  if (modoHorarioAutomatico) {
+    forzadoManual = null;
+    actualizarEstadoHorario(true);
+  } else {
+    forzadoManual = botActivo;
+  }
+  await guardarEstadoHorarioEnFirebase();
+  res.redirect('/');
+});
+
+server.post('/toggle', async (req, res) => {
+  if (modoHorarioAutomatico) {
+    // Si estaba en automático y tocan el botón, pasar a modo manual con el estado inverso
+    modoHorarioAutomatico = false;
+    forzadoManual = !botActivo;
+    botActivo = forzadoManual;
+    registrarActividad('modo', `Cambiado a Modo Manual: ${botActivo ? 'ACTIVO' : 'PAUSADO'}`, true);
+  } else {
+    forzadoManual = !botActivo;
+    botActivo = forzadoManual;
+    registrarActividad('modo', `Modo Manual: ${botActivo ? 'ACTIVO' : 'PAUSADO'}`, true);
+  }
+  await guardarEstadoHorarioEnFirebase();
   res.redirect('/');
 });
 
@@ -877,6 +1019,10 @@ server.get('/debug', (req, res) => {
   res.json({
     estadoConexion,
     botActivo,
+    modoHorarioAutomatico,
+    forzadoManual,
+    dentroDeHorarioLaboral: estaEnHorarioLaboral(),
+    horaMexico: obtenerFechaHoraMexico(),
     hasSocket: !!socketWhatsApp,
     wsReadyState: socketWhatsApp?.ws?.readyState, // 0: CONNECTING, 1: OPEN, 2: CLOSING, 3: CLOSED
     user: socketWhatsApp?.user || null,
