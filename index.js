@@ -51,6 +51,12 @@ let ultimaUnidadIngreso = { numero: '', mensaje: '' };
 let ultimaUnidadLista = { numero: '', mensaje: '' };
 let ultimaFechaReporteEstatus = '';
 let colaPendientes = [];
+let horarioConfig = {
+  semanaInicio: '09:00',
+  semanaFin: '20:00',
+  finSemanaInicio: '09:00',
+  finSemanaFin: '17:00'
+};
 
 function obtenerFechaHoraMexico() {
   const ahora = new Date();
@@ -79,18 +85,25 @@ function obtenerFechaHoraMexico() {
 function estaEnHorarioLaboral() {
   const { diaSemana, hora, minuto } = obtenerFechaHoraMexico();
   const tiempoMinutos = hora * 60 + minuto;
-  const inicioMinutos = 9 * 60; // 9:00 AM (540 min)
 
-  // Lunes a Viernes (1 a 5): 9:00 AM a 8:00 PM (20:00 = 1200 min)
+  const [semIniH, semIniM] = (horarioConfig.semanaInicio || '09:00').split(':').map(Number);
+  const [semFinH, semFinM] = (horarioConfig.semanaFin || '20:00').split(':').map(Number);
+  const [finIniH, finIniM] = (horarioConfig.finSemanaInicio || '09:00').split(':').map(Number);
+  const [finFinH, finFinM] = (horarioConfig.finSemanaFin || '17:00').split(':').map(Number);
+
+  const semInicioMinutos = semIniH * 60 + semIniM;
+  const semFinMinutos = semFinH * 60 + semFinM;
+  const finInicioMinutos = finIniH * 60 + finIniM;
+  const finFinMinutos = finFinH * 60 + finFinM;
+
+  // Lunes a Viernes (1 a 5)
   if (diaSemana >= 1 && diaSemana <= 5) {
-    const finMinutos = 20 * 60;
-    return tiempoMinutos >= inicioMinutos && tiempoMinutos < finMinutos;
+    return tiempoMinutos >= semInicioMinutos && tiempoMinutos < semFinMinutos;
   }
   
-  // Sábado y Domingo (6 y 0): 9:00 AM a 5:00 PM (17:00 = 1020 min)
+  // Sábado y Domingo (6 y 0)
   if (diaSemana === 6 || diaSemana === 0) {
-    const finMinutos = 17 * 60;
-    return tiempoMinutos >= inicioMinutos && tiempoMinutos < finMinutos;
+    return tiempoMinutos >= finInicioMinutos && tiempoMinutos < finFinMinutos;
   }
 
   return false;
@@ -211,13 +224,17 @@ async function enviarReporteEstatusTaller(manual = false) {
 }
 
 async function checarEnvioReporteDiario() {
-  const { hora, minuto } = obtenerFechaHoraMexico();
+  const { diaSemana, hora, minuto } = obtenerFechaHoraMexico();
   const hoyStr = new Date().toLocaleDateString('es-CA', { timeZone: 'America/Mexico_City' }); // YYYY-MM-DD
 
-  // Se activa a las 9:00 AM (entre 9:00 y 9:05 AM) si no se ha enviado hoy
-  if (hora === 9 && minuto >= 0 && minuto < 6) {
+  const esFinDeSemana = (diaSemana === 6 || diaSemana === 0);
+  const horaInicioStr = esFinDeSemana ? (horarioConfig.finSemanaInicio || '09:00') : (horarioConfig.semanaInicio || '09:00');
+  const [hIni, mIni] = horaInicioStr.split(':').map(Number);
+
+  // Se activa a la hora de inicio de turno (ventana de 6 min) si no se ha enviado hoy
+  if (hora === hIni && minuto >= mIni && minuto < mIni + 6) {
     if (ultimaFechaReporteEstatus !== hoyStr && estadoConexion === 'conectado') {
-      console.log(`⏰ [9:00 AM] Enviando reporte diario automático de estatus a Mecánicos...`);
+      console.log(`⏰ [${horaInicioStr}] Enviando reporte diario automático de estatus a Mecánicos...`);
       await enviarReporteEstatusTaller(false);
     }
   }
@@ -378,6 +395,7 @@ async function restaurarConfigDesdeFirebase() {
       if (data.ultimaUnidadIngreso) ultimaUnidadIngreso = data.ultimaUnidadIngreso;
       if (data.ultimaUnidadLista) ultimaUnidadLista = data.ultimaUnidadLista;
       if (data.ultimaFechaReporteEstatus) ultimaFechaReporteEstatus = data.ultimaFechaReporteEstatus;
+      if (data.horarioConfig) horarioConfig = { ...horarioConfig, ...data.horarioConfig };
       guardarConfigLocal(config);
       actualizarEstadoHorario(false);
       console.log('🎯 Configuración y horario restaurados desde la nube:', config);
@@ -835,11 +853,12 @@ server.get('/', (req, res) => {
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Panel Bot WhatsApp - Taller Base44</title>
+  <title>Taller Teziutlán - Control y Notificaciones</title>
   <style>
     body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #0f172a; color: #f8fafc; margin: 0; padding: 16px; }
-    .card { background: #1e293b; border-radius: 16px; padding: 20px; max-width: 520px; margin: 0 auto 16px; box-shadow: 0 4px 20px rgba(0,0,0,0.4); border: 1px solid #334155; }
-    h1 { font-size: 18px; margin: 0 0 16px 0; display: flex; align-items: center; justify-content: space-between; }
+    .card { background: #1e293b; border-radius: 16px; padding: 18px; max-width: 520px; margin: 0 auto 14px; box-shadow: 0 4px 20px rgba(0,0,0,0.4); border: 1px solid #334155; }
+    h1 { font-size: 18px; margin: 0 0 14px 0; display: flex; align-items: center; justify-content: space-between; }
+    h2 { font-size: 15px; margin: 0 0 10px 0; color: #f1f5f9; display: flex; align-items: center; justify-content: space-between; }
     .badge { font-size: 12px; padding: 6px 12px; border-radius: 20px; font-weight: bold; }
     .badge-conectado { background: #059669; color: #fff; }
     .badge-qr { background: #d97706; color: #fff; animation: pulse 1.5s infinite; }
@@ -848,28 +867,32 @@ server.get('/', (req, res) => {
     @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.6; } }
     .qr-container { text-align: center; margin: 16px 0; background: #fff; padding: 16px; border-radius: 12px; }
     .qr-container img { max-width: 260px; width: 100%; height: auto; }
-    .btn { display: inline-block; width: 100%; padding: 12px; font-size: 14px; font-weight: bold; border-radius: 8px; border: none; cursor: pointer; text-align: center; box-sizing: border-box; text-decoration: none; margin-top: 8px; }
+    .btn { display: inline-block; width: 100%; padding: 11px; font-size: 13px; font-weight: bold; border-radius: 8px; border: none; cursor: pointer; text-align: center; box-sizing: border-box; text-decoration: none; margin-top: 6px; }
     .btn-toggle-on { background: #10b981; color: white; }
     .btn-toggle-off { background: #64748b; color: white; }
     .btn-save { background: #3b82f6; color: white; }
+    .btn-purple { background: #6366f1; color: white; }
     .btn-danger { background: #ef4444; color: white; }
     .btn-assign { padding: 6px 10px; font-size: 11px; font-weight: bold; border-radius: 6px; border: none; cursor: pointer; color: white; }
     .btn-blue { background: #2563eb; }
     .btn-green { background: #059669; }
-    .form-group { margin-bottom: 14px; }
-    label { display: block; font-size: 13px; color: #94a3b8; margin-bottom: 6px; font-weight: 600; }
-    input[type="text"] { width: 100%; padding: 12px; background: #0f172a; border: 1px solid #334155; border-radius: 8px; color: #fff; font-size: 13px; box-sizing: border-box; }
-    .group-item { background: #0f172a; padding: 12px; border-radius: 10px; margin-bottom: 10px; border: 1px solid #334155; }
-    .group-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; }
-    .group-name { font-weight: bold; font-size: 14px; color: #f1f5f9; }
+    .form-group { margin-bottom: 12px; }
+    label { display: block; font-size: 12px; color: #94a3b8; margin-bottom: 5px; font-weight: 600; }
+    input[type="text"], input[type="time"], select { width: 100%; padding: 10px 12px; background: #0f172a; border: 1px solid #334155; border-radius: 8px; color: #fff; font-size: 13px; box-sizing: border-box; }
+    .tab-bar { display: flex; gap: 6px; background: #0f172a; padding: 4px; border-radius: 12px; border: 1px solid #334155; margin-top: 12px; }
+    .tab-btn { flex: 1; padding: 10px 4px; border: none; border-radius: 8px; background: transparent; color: #94a3b8; font-size: 12px; font-weight: bold; cursor: pointer; transition: all 0.2s; }
+    .tab-btn.active { background: #2563eb; color: #fff; box-shadow: 0 2px 8px rgba(37,99,235,0.4); }
+    .group-item { background: #0f172a; padding: 10px; border-radius: 8px; margin-bottom: 8px; border: 1px solid #334155; }
+    .group-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px; }
+    .group-name { font-weight: bold; font-size: 13px; color: #f1f5f9; }
     .group-id { color: #38bdf8; font-family: monospace; font-size: 11px; word-break: break-all; }
-    .group-actions { display: flex; gap: 8px; margin-top: 8px; }
+    .group-actions { display: flex; gap: 8px; margin-top: 6px; }
   </style>
 </head>
 <body>
-  <div class="card">
+  <div class="card" style="margin-bottom: 12px;">
     <h1>
-      <span>🤖 Bot Taller Base44</span>
+      <span>🤖 Taller Teziutlán</span>
       <span class="badge ${
         estadoConexion === 'conectado' ? 'badge-conectado' : 
         (estadoConexion === 'esperando_qr' ? 'badge-qr' : 
@@ -883,18 +906,45 @@ server.get('/', (req, res) => {
       </span>
     </h1>
 
-    <div style="margin: 14px 0; background: #0f172a; padding: 14px; border-radius: 12px; border: 1px solid #334155;">
+    <div class="tab-bar">
+      <button type="button" class="tab-btn active" id="btn-tab-monitor" onclick="cambiarTab('monitor')">
+        📊 Monitor en Vivo
+      </button>
+      <button type="button" class="tab-btn" id="btn-tab-config" onclick="cambiarTab('config')">
+        ⚙️ Configuración y Botones
+      </button>
+    </div>
+  </div>
+
+  ${estadoConexion === 'esperando_qr' && ultimoQRDataURL ? `
+    <div class="card qr-container">
+      <p style="color: #0f172a; font-weight: bold; margin-top: 0; font-size: 14px;">Escanea este código con tu WhatsApp:</p>
+      <img src="${ultimoQRDataURL}" alt="Código QR WhatsApp" />
+      <p style="color: #64748b; font-size: 11px; margin-bottom: 0;">WhatsApp > 3 puntitos > Dispositivos vinculados</p>
+    </div>
+  ` : ''}
+
+  ${estadoConexion === 'iniciando' || (estadoConexion !== 'conectado' && !ultimoQRDataURL) ? `
+    <div class="card" style="text-align: center; padding: 20px 10px;">
+      <p style="margin: 0; font-size: 14px; color: #cbd5e1;">⏳ Conectando con WhatsApp y restaurando sesión...</p>
+      <p style="margin: 6px 0 0 0; font-size: 12px; color: #64748b;">La página se actualizará automáticamente en unos segundos.</p>
+    </div>
+  ` : ''}
+
+  <!-- PESTAÑA 1: MONITOR EN VIVO -->
+  <div id="tab-monitor">
+    <div class="card">
       <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
-        <span style="font-size: 13px; font-weight: bold; color: #94a3b8;">CONTROL DE HORARIO:</span>
+        <span style="font-size: 13px; font-weight: bold; color: #94a3b8;">ESTADO DEL HORARIO:</span>
         <span style="font-size: 11px; padding: 3px 8px; border-radius: 12px; background: ${modoHorarioAutomatico ? '#065f46' : '#854d0e'}; color: white; font-weight: bold;">
           ${modoHorarioAutomatico ? '🕒 Horario Automático' : '👤 Modo Manual'}
         </span>
       </div>
 
-      <div style="font-size: 12px; color: #cbd5e1; margin-bottom: 12px; line-height: 1.5;">
-        📅 <b>Lunes a Viernes:</b> 9:00 AM – 8:00 PM<br/>
-        📅 <b>Sábado y Domingo:</b> 9:00 AM – 5:00 PM<br/>
-        <div style="margin-top: 6px; font-weight: bold;">
+      <div style="font-size: 12px; color: #cbd5e1; margin-bottom: 12px; line-height: 1.5; background: #0f172a; padding: 10px; border-radius: 8px; border: 1px solid #334155;">
+        📅 <b>L-V:</b> ${horarioConfig.semanaInicio || '09:00'} a ${horarioConfig.semanaFin || '20:00'} &nbsp;|&nbsp; 
+        📅 <b>S-D:</b> ${horarioConfig.finSemanaInicio || '09:00'} a ${horarioConfig.finSemanaFin || '17:00'}<br/>
+        <div style="margin-top: 4px; font-weight: bold;">
           ${modoHorarioAutomatico ? (
             botActivo 
               ? '<span style="color: #34d399;">🟢 Dentro de turno laboral (Enviando mensajes)</span>'
@@ -909,145 +959,204 @@ server.get('/', (req, res) => {
 
       <div style="display: flex; gap: 8px;">
         <form action="/toggle-horario" method="POST" style="flex: 1; margin: 0;">
-          <button type="submit" class="btn" style="background: ${modoHorarioAutomatico ? '#334155' : '#059669'}; font-size: 12px; padding: 10px 4px; margin: 0;">
-            ${modoHorarioAutomatico ? 'Cambiar a Manual' : 'Usar Horario Automático'}
+          <button type="submit" class="btn" style="background: ${modoHorarioAutomatico ? '#334155' : '#059669'}; font-size: 12px; padding: 9px 4px; margin: 0;">
+            ${modoHorarioAutomatico ? 'Cambiar a Manual' : 'Usar Horario Auto'}
           </button>
         </form>
         <form action="/toggle" method="POST" style="flex: 1; margin: 0;">
-          <button type="submit" class="btn ${botActivo ? 'btn-toggle-on' : 'btn-toggle-off'}" style="font-size: 12px; padding: 10px 4px; margin: 0;">
+          <button type="submit" class="btn ${botActivo ? 'btn-toggle-on' : 'btn-toggle-off'}" style="font-size: 12px; padding: 9px 4px; margin: 0;">
             ${botActivo ? 'Pausar Bot' : 'Activar Bot'}
           </button>
         </form>
       </div>
     </div>
 
-    ${estadoConexion === 'esperando_qr' && ultimoQRDataURL ? `
-      <div class="qr-container">
-        <p style="color: #0f172a; font-weight: bold; margin-top: 0; font-size: 14px;">Escanea este código con tu WhatsApp:</p>
-        <img src="${ultimoQRDataURL}" alt="Código QR WhatsApp" />
-        <p style="color: #64748b; font-size: 11px; margin-bottom: 0;">WhatsApp > 3 puntitos > Dispositivos vinculados</p>
-      </div>
-    ` : ''}
-
-    ${estadoConexion === 'iniciando' || (estadoConexion !== 'conectado' && !ultimoQRDataURL) ? `
-      <div style="text-align: center; padding: 20px 10px; background: #0f172a; border-radius: 12px; margin: 16px 0;">
-        <p style="margin: 0; font-size: 14px; color: #cbd5e1;">⏳ Conectando con WhatsApp y restaurando sesión...</p>
-        <p style="margin: 6px 0 0 0; font-size: 12px; color: #64748b;">La página se actualizará automáticamente en unos segundos.</p>
-      </div>
-    ` : ''}
-
     ${estadoConexion === 'conectado' ? `
-      <p style="color: #10b981; font-size: 13px; text-align: center; margin: 10px 0;">✅ WhatsApp vinculado y listo para enviar mensajes.</p>
-      <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin: 10px 0;">
-        <form action="/probar-ingresos" method="POST" style="margin: 0;">
-          <button type="submit" class="btn btn-save" style="font-size: 11px; padding: 10px 2px; margin: 0; background: #2563eb;">🧪 Probar Mecánicos</button>
+      <div class="card">
+        <h2><span>⚡ Acciones Rápidas</span></h2>
+        <form action="/enviar-estatus-diario" method="POST" style="margin: 0 0 8px 0;">
+          <button type="submit" class="btn btn-purple" style="font-size: 12px; padding: 11px 4px; margin: 0;">📋 Enviar Estatus del Taller Ahora (Mecánicos)</button>
         </form>
-        <form action="/probar-listas" method="POST" style="margin: 0;">
-          <button type="submit" class="btn btn-save" style="font-size: 11px; padding: 10px 2px; margin: 0; background: #059669;">🧪 Probar Listas</button>
-        </form>
-        <form action="/reenviar-ultima" method="POST" style="margin: 0;">
-          <button type="submit" class="btn btn-save" style="font-size: 11px; padding: 10px 2px; margin: 0; background: #d97706;">🔁 Reenviar Ingreso ${ultimaUnidadIngreso.numero ? `(#${ultimaUnidadIngreso.numero})` : ''}</button>
-        </form>
-        <form action="/reenviar-ultima-lista" method="POST" style="margin: 0;">
-          <button type="submit" class="btn btn-save" style="font-size: 11px; padding: 10px 2px; margin: 0; background: #0d9488;">🔁 Reenviar Lista ${ultimaUnidadLista.numero ? `(#${ultimaUnidadLista.numero})` : ''}</button>
-        </form>
-        <form action="/enviar-estatus-diario" method="POST" style="grid-column: span 2; margin: 0;">
-          <button type="submit" class="btn btn-save" style="font-size: 12px; padding: 11px 4px; margin: 0; background: #6366f1;">📋 Enviar Estatus del Taller Ahora (Mecánicos)</button>
-        </form>
-      </div>
-
-      <form action="/enviar-directo" method="POST" style="margin: 10px 0; background: #0f172a; padding: 10px; border-radius: 8px; border: 1px solid #334155;">
-        <label style="font-size: 11px; margin-bottom: 6px; display: block; color: #94a3b8;">💬 Enviar mensaje directo:</label>
-        <div style="display: flex; gap: 6px;">
-          <select name="destino" style="background: #1e293b; color: white; border: 1px solid #334155; border-radius: 6px; padding: 6px; font-size: 11px;">
-            <option value="listas">Unidades Listas</option>
-            <option value="ingresos">Mecánicos (Ingreso)</option>
-          </select>
-          <input type="text" name="texto" placeholder="Ej: 3608 lista" style="flex: 1; padding: 6px 10px; font-size: 12px; background: #1e293b; border: 1px solid #334155; border-radius: 6px; color: white;" required />
-          <button type="submit" class="btn-assign btn-green" style="font-size: 11px; padding: 6px 12px;">Enviar</button>
-        </div>
-      </form>
-
-      <form action="/logout" method="POST" onsubmit="return confirm('¿Seguro que deseas desvincular el celular?');">
-        <button type="submit" class="btn btn-danger">Desvincular WhatsApp / Cambiar Celular</button>
-      </form>
-    ` : ''}
-  </div>
-
-  <div class="card">
-    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
-      <h2 style="font-size: 15px; margin: 0;">🕒 Actividad Reciente en Vivo:</h2>
-      <span style="font-size: 11px; color: #94a3b8;">Últimos eventos</span>
-    </div>
-    ${historialActividad.length === 0 ? `
-      <p style="font-size: 12px; color: #64748b; margin: 0; text-align: center; padding: 12px;">Esperando eventos de unidades o pulsos del despertador...</p>
-    ` : `
-      <div style="display: flex; flex-direction: column; gap: 8px;">
-        ${historialActividad.map(ev => `
-          <div style="background: #0f172a; padding: 8px 12px; border-radius: 8px; font-size: 12px; display: flex; justify-content: space-between; align-items: center; border-left: 3px solid ${ev.ok ? '#10b981' : '#ef4444'};">
-            <div style="overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-right: 8px;">
-              <span style="color: #94a3b8; font-family: monospace; font-size: 11px; margin-right: 6px;">[${ev.hora}]</span>
-              <span style="color: ${ev.ok ? '#f1f5f9' : '#f87171'}; font-weight: 500;">${ev.detalle}</span>
-            </div>
-            <span style="font-size: 10px; padding: 2px 6px; border-radius: 4px; background: ${ev.ok ? '#065f46' : '#7f1d1d'}; color: white; white-space: nowrap;">
-              ${ev.tipo.toUpperCase()}
-            </span>
-          </div>
-        `).join('')}
-      </div>
-    `}
-  </div>
-
-  <div class="card">
-    <h2 style="font-size: 16px; margin-top: 0;">🎯 Grupos Asignados</h2>
-    <form action="/guardar-config" method="POST">
-      <div class="form-group">
-        <label>Grupo Tráfico (Nuevas Unidades):</label>
-        <input type="text" id="inputIngresos" name="grupoIngresosId" value="${config.grupoIngresosId || ''}" placeholder="ID de Mecánicos Teziutlan" />
-      </div>
-      <div class="form-group">
-        <label>Grupo Listas (Unidades terminadas):</label>
-        <input type="text" id="inputListas" name="grupoListasId" value="${config.grupoListasId || ''}" placeholder="ID de Unidades listas" />
-      </div>
-      <button type="submit" class="btn btn-save">Guardar Grupos</button>
-    </form>
-  </div>
-
-  ${estadoConexion === 'conectado' ? `
-    <div class="card">
-      <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
-        <h2 style="font-size: 15px; margin: 0;">📋 Tus Grupos de WhatsApp:</h2>
-        <form action="/cargar-grupos" method="POST" style="margin: 0;">
-          <button type="submit" class="btn-assign btn-blue" style="font-size: 12px; padding: 6px 12px;">🔄 Buscar Grupos</button>
-        </form>
-      </div>
-
-      ${gruposDetectados.length === 0 ? `
-        <div style="text-align: center; padding: 16px; background: #0f172a; border-radius: 10px;">
-          <p style="font-size: 13px; color: #94a3b8; margin: 0 0 10px 0;">Presiona el botón azul para listar los grupos de tu WhatsApp:</p>
-          <form action="/cargar-grupos" method="POST">
-            <button type="submit" class="btn btn-save">🔄 Obtener Mis Grupos de WhatsApp</button>
+        <div style="display: flex; gap: 8px;">
+          <form action="/reenviar-ultima" method="POST" style="flex: 1; margin: 0;">
+            <button type="submit" class="btn btn-save" style="font-size: 11px; padding: 9px 2px; margin: 0; background: #d97706;">🔁 Reenviar Ingreso ${ultimaUnidadIngreso.numero ? `(#${ultimaUnidadIngreso.numero})` : ''}</button>
+          </form>
+          <form action="/reenviar-ultima-lista" method="POST" style="flex: 1; margin: 0;">
+            <button type="submit" class="btn btn-save" style="font-size: 11px; padding: 9px 2px; margin: 0; background: #0d9488;">🔁 Reenviar Lista ${ultimaUnidadLista.numero ? `(#${ultimaUnidadLista.numero})` : ''}</button>
           </form>
         </div>
+      </div>
+    ` : ''}
+
+    <div class="card">
+      <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
+        <h2 style="margin: 0;">🕒 Actividad Reciente en Vivo:</h2>
+        <span style="font-size: 11px; color: #94a3b8;">Últimos eventos</span>
+      </div>
+      ${historialActividad.length === 0 ? `
+        <p style="font-size: 12px; color: #64748b; margin: 0; text-align: center; padding: 12px;">Esperando eventos de unidades o pulsos del despertador...</p>
       ` : `
-        <p style="font-size: 12px; color: #94a3b8; margin-top: 0;">Toca el botón azul o verde para asignar el grupo directamente:</p>
-        ${gruposDetectados.map(g => `
-          <div class="group-item">
-            <div class="group-header">
-              <span class="group-name">${g.name}</span>
+        <div style="display: flex; flex-direction: column; gap: 6px;">
+          ${historialActividad.map(ev => `
+            <div style="background: #0f172a; padding: 8px 10px; border-radius: 8px; font-size: 12px; display: flex; justify-content: space-between; align-items: center; border-left: 3px solid ${ev.ok ? '#10b981' : '#ef4444'};">
+              <div style="overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-right: 8px;">
+                <span style="color: #94a3b8; font-family: monospace; font-size: 11px; margin-right: 6px;">[${ev.hora}]</span>
+                <span style="color: ${ev.ok ? '#f1f5f9' : '#f87171'}; font-weight: 500;">${ev.detalle}</span>
+              </div>
+              <span style="font-size: 10px; padding: 2px 6px; border-radius: 4px; background: ${ev.ok ? '#065f46' : '#7f1d1d'}; color: white; white-space: nowrap;">
+                ${ev.tipo.toUpperCase()}
+              </span>
             </div>
-            <div class="group-id">${g.id}</div>
-            <div class="group-actions">
-              <button type="button" class="btn-assign btn-blue" onclick="asignarIngresos('${g.id}')">Usar para Nuevas</button>
-              <button type="button" class="btn-assign btn-green" onclick="asignarListas('${g.id}')">Usar para Listas</button>
-            </div>
-          </div>
-        `).join('')}
+          `).join('')}
+        </div>
       `}
     </div>
-  ` : ''}
+  </div>
+
+  <!-- PESTAÑA 2: CONFIGURACIÓN Y BOTONES -->
+  <div id="tab-config" style="display: none;">
+    <div class="card">
+      <h2><span>🕒 Modificar Horarios Laborales</span></h2>
+      <p style="font-size: 12px; color: #94a3b8; margin: 0 0 12px 0;">
+        Puedes ajustar las horas de inicio y fin cuando lo desees. A la hora de inicio se activa y manda el reporte general; a la de fin se pausa solo.
+      </p>
+      <form action="/guardar-horarios" method="POST">
+        <div style="background: #0f172a; padding: 12px; border-radius: 10px; margin-bottom: 10px; border: 1px solid #334155;">
+          <label style="color: #38bdf8; font-size: 12px; margin-bottom: 6px;">📅 Lunes a Viernes:</label>
+          <div style="display: flex; gap: 8px; align-items: center;">
+            <div style="flex: 1;">
+              <span style="font-size: 11px; color: #94a3b8;">Hora Inicio:</span>
+              <input type="time" name="semanaInicio" value="${horarioConfig.semanaInicio || '09:00'}" required />
+            </div>
+            <div style="flex: 1;">
+              <span style="font-size: 11px; color: #94a3b8;">Hora Fin:</span>
+              <input type="time" name="semanaFin" value="${horarioConfig.semanaFin || '20:00'}" required />
+            </div>
+          </div>
+        </div>
+
+        <div style="background: #0f172a; padding: 12px; border-radius: 10px; margin-bottom: 12px; border: 1px solid #334155;">
+          <label style="color: #38bdf8; font-size: 12px; margin-bottom: 6px;">📅 Sábado y Domingo:</label>
+          <div style="display: flex; gap: 8px; align-items: center;">
+            <div style="flex: 1;">
+              <span style="font-size: 11px; color: #94a3b8;">Hora Inicio:</span>
+              <input type="time" name="finSemanaInicio" value="${horarioConfig.finSemanaInicio || '09:00'}" required />
+            </div>
+            <div style="flex: 1;">
+              <span style="font-size: 11px; color: #94a3b8;">Hora Fin:</span>
+              <input type="time" name="finSemanaFin" value="${horarioConfig.finSemanaFin || '17:00'}" required />
+            </div>
+          </div>
+        </div>
+
+        <button type="submit" class="btn btn-save" style="margin-top: 0;">💾 Guardar Nuevos Horarios</button>
+      </form>
+    </div>
+
+    ${estadoConexion === 'conectado' ? `
+      <div class="card">
+        <h2><span>🧪 Pruebas de Diagnóstico</span></h2>
+        <div style="display: flex; gap: 8px;">
+          <form action="/probar-ingresos" method="POST" style="flex: 1; margin: 0;">
+            <button type="submit" class="btn btn-save" style="font-size: 11px; padding: 10px 2px; margin: 0; background: #2563eb;">🧪 Probar Mecánicos</button>
+          </form>
+          <form action="/probar-listas" method="POST" style="flex: 1; margin: 0;">
+            <button type="submit" class="btn btn-save" style="font-size: 11px; padding: 10px 2px; margin: 0; background: #059669;">🧪 Probar Listas</button>
+          </form>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2><span>💬 Enviar Mensaje Directo</span></h2>
+        <form action="/enviar-directo" method="POST">
+          <div class="form-group">
+            <label>Destino:</label>
+            <select name="destino">
+              <option value="ingresos">Mecánicos Teziutlan (Ingresos)</option>
+              <option value="listas">Unidades Listas ✅</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label>Texto del mensaje:</label>
+            <input type="text" name="texto" placeholder="Ej: 3608 lista" required />
+          </div>
+          <button type="submit" class="btn btn-green" style="margin-top: 0;">Enviar a WhatsApp</button>
+        </form>
+      </div>
+    ` : ''}
+
+    <div class="card">
+      <h2><span>🎯 Grupos Asignados</span></h2>
+      <form action="/guardar-config" method="POST">
+        <div class="form-group">
+          <label>Grupo Tráfico (Nuevas Unidades):</label>
+          <input type="text" id="inputIngresos" name="grupoIngresosId" value="${config.grupoIngresosId || ''}" placeholder="ID de Mecánicos Teziutlan" />
+        </div>
+        <div class="form-group">
+          <label>Grupo Listas (Unidades terminadas):</label>
+          <input type="text" id="inputListas" name="grupoListasId" value="${config.grupoListasId || ''}" placeholder="ID de Unidades listas" />
+        </div>
+        <button type="submit" class="btn btn-save">Guardar Grupos</button>
+      </form>
+    </div>
+
+    ${estadoConexion === 'conectado' ? `
+      <div class="card">
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
+          <h2 style="margin: 0;">📋 Tus Grupos de WhatsApp:</h2>
+          <form action="/cargar-grupos" method="POST" style="margin: 0;">
+            <button type="submit" class="btn-assign btn-blue" style="font-size: 11px; padding: 5px 10px;">🔄 Buscar Grupos</button>
+          </form>
+        </div>
+
+        ${gruposDetectados.length === 0 ? `
+          <div style="text-align: center; padding: 14px; background: #0f172a; border-radius: 10px;">
+            <p style="font-size: 12px; color: #94a3b8; margin: 0 0 8px 0;">Presiona el botón azul para listar los grupos de tu WhatsApp:</p>
+            <form action="/cargar-grupos" method="POST">
+              <button type="submit" class="btn btn-save" style="font-size: 12px; padding: 8px;">🔄 Obtener Mis Grupos de WhatsApp</button>
+            </form>
+          </div>
+        ` : `
+          <p style="font-size: 11px; color: #94a3b8; margin-top: 0;">Toca el botón azul o verde para asignar el grupo directamente:</p>
+          ${gruposDetectados.map(g => `
+            <div class="group-item">
+              <div class="group-header">
+                <span class="group-name">${g.name}</span>
+              </div>
+              <div class="group-id">${g.id}</div>
+              <div class="group-actions">
+                <button type="button" class="btn-assign btn-blue" onclick="asignarIngresos('${g.id}')">Usar para Nuevas</button>
+                <button type="button" class="btn-assign btn-green" onclick="asignarListas('${g.id}')">Usar para Listas</button>
+              </div>
+            </div>
+          `).join('')}
+        `}
+      </div>
+
+      <div class="card">
+        <h2><span style="color: #f87171;">⚠️ Conexión del Celular</span></h2>
+        <form action="/logout" method="POST" onsubmit="return confirm('¿Seguro que deseas desvincular el celular?');">
+          <button type="submit" class="btn btn-danger" style="margin-top: 0;">Desvincular WhatsApp / Cambiar Celular</button>
+        </form>
+      </div>
+    ` : ''}
+  </div>
 
   <script>
+    function cambiarTab(tab) {
+      document.getElementById('tab-monitor').style.display = tab === 'monitor' ? 'block' : 'none';
+      document.getElementById('tab-config').style.display = tab === 'config' ? 'block' : 'none';
+      document.getElementById('btn-tab-monitor').classList.toggle('active', tab === 'monitor');
+      document.getElementById('btn-tab-config').classList.toggle('active', tab === 'config');
+      localStorage.setItem('taller_active_tab', tab);
+      if (tab === 'config') window.location.hash = 'config';
+      else window.location.hash = 'monitor';
+    }
+
+    // Inicializar pestaña activa
+    const initialTab = (window.location.hash === '#config' || localStorage.getItem('taller_active_tab') === 'config') ? 'config' : 'monitor';
+    cambiarTab(initialTab);
+
     function asignarIngresos(id) {
       document.getElementById('inputIngresos').value = id;
       alert('Asignado para Nuevas Unidades. Haz clic en \"Guardar Grupos\" para confirmar.');
@@ -1112,7 +1221,29 @@ server.post('/guardar-config', async (req, res) => {
   };
   guardarConfigLocal(config);
   await guardarConfigEnFirebase(config);
-  res.redirect('/');
+  res.redirect('/#config');
+});
+
+server.post('/guardar-horarios', async (req, res) => {
+  const { semanaInicio, semanaFin, finSemanaInicio, finSemanaFin } = req.body;
+  horarioConfig = {
+    semanaInicio: semanaInicio || '09:00',
+    semanaFin: semanaFin || '20:00',
+    finSemanaInicio: finSemanaInicio || '09:00',
+    finSemanaFin: finSemanaFin || '17:00'
+  };
+  actualizarEstadoHorario(true);
+  try {
+    await setDoc(doc(firestore, '_system', 'whatsapp_config'), {
+      ...config,
+      horarioConfig
+    }, { merge: true });
+    console.log('💾 Nuevos horarios guardados en Firebase:', horarioConfig);
+    registrarActividad('horario', `Horarios actualizados: L-V ${horarioConfig.semanaInicio}-${horarioConfig.semanaFin}, S-D ${horarioConfig.finSemanaInicio}-${horarioConfig.finSemanaFin}`, true);
+  } catch (e) {
+    console.error('Error al guardar horarios:', e.message);
+  }
+  res.redirect('/#config');
 });
 
 server.post('/logout', async (req, res) => {
@@ -1131,6 +1262,7 @@ server.get('/debug', (req, res) => {
     modoHorarioAutomatico,
     forzadoManual,
     dentroDeHorarioLaboral: estaEnHorarioLaboral(),
+    horarioConfig,
     horaMexico: obtenerFechaHoraMexico(),
     hasSocket: !!socketWhatsApp,
     wsReadyState: socketWhatsApp?.ws?.readyState, // 0: CONNECTING, 1: OPEN, 2: CLOSING, 3: CLOSED
