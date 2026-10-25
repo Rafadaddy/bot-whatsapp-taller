@@ -49,6 +49,7 @@ let historialActividad = [];
 const MAX_HISTORIAL = 20;
 let ultimaUnidadIngreso = { numero: '', mensaje: '' };
 let ultimaUnidadLista = { numero: '', mensaje: '' };
+let ultimaFechaReporteEstatus = '';
 let colaPendientes = [];
 
 function obtenerFechaHoraMexico() {
@@ -119,9 +120,113 @@ function actualizarEstadoHorario(notificarCambio = false) {
 // Inicializar el estado de horario al cargar el módulo
 actualizarEstadoHorario(false);
 
+async function generarTextoEstatusTaller() {
+  try {
+    const snap = await getDocs(collection(firestore, 'units'));
+    const activeUnits = [];
+    
+    snap.forEach(d => {
+      const u = d.data();
+      // Excluir entregadas, listas, paros técnicos y trámites legales
+      if (!['entregada', 'lista', 'paro_tecnico', 'tramite_legal'].includes(u.status)) {
+        activeUnits.push(u);
+      }
+    });
+
+    if (activeUnits.length === 0) {
+      return null;
+    }
+
+    // Ordenar numéricamente por número de unidad
+    activeUnits.sort((a, b) => (a.unit_number || '').localeCompare(b.unit_number || '', undefined, { numeric: true }));
+
+    const now = new Date();
+    const fechaStr = now.toLocaleDateString('es-ES', { 
+      timeZone: 'America/Mexico_City', 
+      day: '2-digit', 
+      month: 'long' 
+    });
+
+    const lineas = activeUnits.map(u => {
+      const num = u.unit_number || 'S/N';
+      
+      let fallasText = [];
+      if (u.reason && !u.reason_resolved) fallasText.push(u.reason);
+      if (Array.isArray(u.faults)) {
+        const activeFaults = u.faults
+          .filter(f => f.status !== 'resuelta')
+          .map(f => typeof f === 'string' ? f : (f.description || f.cause || ''))
+          .filter(Boolean);
+        fallasText = [...new Set([...fallasText, ...activeFaults])];
+      }
+      const fallas = fallasText.length > 0 ? fallasText.join(' // ') : (u.reported_fault || 'En revisión');
+
+      // Si está por falta de refacción, recalcar la refacción faltante
+      if (u.status === 'espera_refaccion') {
+        const pieza = u.missing_parts_desc ? u.missing_parts_desc.trim() : 'Sin especificar';
+        return `*${num}* ${fallas} ⚠️ (POR FALTA DE REFACCIÓN: ${pieza})`;
+      }
+
+      // Unidades normales en taller: limpias sin saturar
+      return `*${num}* ${fallas}`;
+    });
+
+    return `*ESTATUS DE TALLER ${fechaStr.toUpperCase()}*\n\n` + lineas.join('\n\n');
+  } catch (err) {
+    console.error('Error al generar reporte de estatus:', err.message);
+    return null;
+  }
+}
+
+async function enviarReporteEstatusTaller(manual = false) {
+  config = leerConfig();
+  if (!config.grupoIngresosId) {
+    console.warn('⚠️ No se puede enviar el estatus: falta asignar el ID del grupo de Mecánicos.');
+    if (manual) registrarActividad('error', 'Sin grupo de Mecánicos asignado', false);
+    return false;
+  }
+
+  console.log(`📋 ${manual ? '[MANUAL]' : '[AUTOMÁTICO 9:00 AM]'} Generando reporte de estatus del taller...`);
+  const textoReporte = await generarTextoEstatusTaller();
+  if (!textoReporte) {
+    console.log('ℹ️ No hay unidades activas en taller para reportar.');
+    if (manual) registrarActividad('reporte', 'Sin unidades activas en taller', true);
+    return false;
+  }
+
+  const ok = await enviarMensajeGrupo(config.grupoIngresosId, textoReporte);
+  if (ok) {
+    const ahoraMx = new Date().toLocaleDateString('es-CA', { timeZone: 'America/Mexico_City' }); // YYYY-MM-DD
+    ultimaFechaReporteEstatus = ahoraMx;
+    registrarActividad('reporte', `Estatus taller enviado a Mecánicos (${manual ? 'Manual' : '9:00 AM'})`, true);
+    try {
+      await setDoc(doc(firestore, '_system', 'whatsapp_config'), {
+        ...config,
+        ultimaFechaReporteEstatus: ahoraMx
+      }, { merge: true });
+    } catch (e) {}
+    return true;
+  }
+  return false;
+}
+
+async function checarEnvioReporteDiario() {
+  const { hora, minuto } = obtenerFechaHoraMexico();
+  const hoyStr = new Date().toLocaleDateString('es-CA', { timeZone: 'America/Mexico_City' }); // YYYY-MM-DD
+
+  // Se activa a las 9:00 AM (entre 9:00 y 9:05 AM) si no se ha enviado hoy
+  if (hora === 9 && minuto >= 0 && minuto < 6) {
+    if (ultimaFechaReporteEstatus !== hoyStr && estadoConexion === 'conectado') {
+      console.log(`⏰ [9:00 AM] Enviando reporte diario automático de estatus a Mecánicos...`);
+      await enviarReporteEstatusTaller(false);
+    }
+  }
+}
+
 // Chequeo periódico cada 30 segundos
-setInterval(() => {
+setInterval(async () => {
   actualizarEstadoHorario(true);
+  await checarEnvioReporteDiario();
 }, 30000);
 
 function esperarConexion(timeoutMs = 15000) {
@@ -272,6 +377,7 @@ async function restaurarConfigDesdeFirebase() {
       if (data.forzadoManual !== undefined) forzadoManual = data.forzadoManual;
       if (data.ultimaUnidadIngreso) ultimaUnidadIngreso = data.ultimaUnidadIngreso;
       if (data.ultimaUnidadLista) ultimaUnidadLista = data.ultimaUnidadLista;
+      if (data.ultimaFechaReporteEstatus) ultimaFechaReporteEstatus = data.ultimaFechaReporteEstatus;
       guardarConfigLocal(config);
       actualizarEstadoHorario(false);
       console.log('🎯 Configuración y horario restaurados desde la nube:', config);
@@ -845,6 +951,9 @@ server.get('/', (req, res) => {
         <form action="/reenviar-ultima-lista" method="POST" style="margin: 0;">
           <button type="submit" class="btn btn-save" style="font-size: 11px; padding: 10px 2px; margin: 0; background: #0d9488;">🔁 Reenviar Lista ${ultimaUnidadLista.numero ? `(#${ultimaUnidadLista.numero})` : ''}</button>
         </form>
+        <form action="/enviar-estatus-diario" method="POST" style="grid-column: span 2; margin: 0;">
+          <button type="submit" class="btn btn-save" style="font-size: 12px; padding: 11px 4px; margin: 0; background: #6366f1;">📋 Enviar Estatus del Taller Ahora (Mecánicos)</button>
+        </form>
       </div>
 
       <form action="/enviar-directo" method="POST" style="margin: 10px 0; background: #0f172a; padding: 10px; border-radius: 8px; border: 1px solid #334155;">
@@ -1117,6 +1226,11 @@ server.post('/reenviar-ultima-lista', async (req, res) => {
   } catch (e) {
     console.error('Error al reenviar última lista:', e.message);
   }
+  res.redirect('/');
+});
+
+server.post('/enviar-estatus-diario', async (req, res) => {
+  await enviarReporteEstatusTaller(true);
   res.redirect('/');
 });
 
