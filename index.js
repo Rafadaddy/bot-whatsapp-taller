@@ -627,18 +627,11 @@ async function iniciarWhatsApp() {
 
     if (connection === 'close') {
       const statusCode = lastDisconnect?.error?.output?.statusCode;
-      const debeReconectar = statusCode !== DisconnectReason.loggedOut;
-      console.log(`⚠️ Conexión de WhatsApp cerrada (Código: ${statusCode}). Reconectando: ${debeReconectar}`);
-      
-      if (debeReconectar) {
-        estadoConexion = 'iniciando';
-        setTimeout(iniciarWhatsApp, 3000);
-      } else {
-        estadoConexion = 'desconectado';
-        console.log('❌ Sesión cerrada permanentemente.');
-        await limpiarSesionFirebase();
-        setTimeout(iniciarWhatsApp, 2000);
-      }
+      console.log(`⚠️ Conexión de WhatsApp cerrada (Código: ${statusCode}). Reintentando reconexión automática en 3s...`);
+      estadoConexion = 'iniciando';
+      // SEGURIDAD: NUNCA borrar la sesión de Firebase automáticamente por caídas de red o reinicios.
+      // La sesión solo se desvincula si el usuario presiona expresamente el botón 'Desvincular' en el panel.
+      setTimeout(iniciarWhatsApp, 3000);
     }
   });
 
