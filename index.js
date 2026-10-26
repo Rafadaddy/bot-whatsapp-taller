@@ -614,12 +614,8 @@ async function iniciarWhatsApp() {
       setTimeout(procesarColaPendientes, 6000);
 
       if (!listenerIniciado) {
-        setTimeout(() => {
-          if (!listenerIniciado && estadoConexion === 'conectado') {
-            iniciarListenerFirebase();
-            listenerIniciado = true;
-          }
-        }, 5000);
+        iniciarListenerFirebase();
+        listenerIniciado = true;
       }
     }
 
@@ -830,10 +826,10 @@ function iniciarListenerFirebase() {
           unit_number: numUnidad
         });
 
-        // Solo notificar si la unidad fue creada en los últimos 15 segundos (en tiempo real estricto)
+        // Solo notificar si fue creada recientemente (ventana de 3 min para absorber latencia de red móvil)
         const fechaCreacion = unit.created_date ? new Date(unit.created_date).getTime() : ahora;
         const edadMs = ahora - fechaCreacion;
-        if (edadMs > 15000) {
+        if (edadMs > 180000) {
           console.log(`⏱️ [#${numUnidad}] Registro atrasado (hace ${Math.round(edadMs / 1000)}s). Omitiendo.`);
           notifiedSet.add(docId + '_ingreso');
           continue;
@@ -854,13 +850,13 @@ function iniciarListenerFirebase() {
         });
 
         if (estatusActual === 'lista' && estatusAnterior !== 'lista') {
-          // Solo notificar si fue marcada lista en los últimos 15 segundos
+          // Solo notificar si fue marcada lista recientemente (ventana de 3 min)
           const listaEvent = Array.isArray(unit.timeline) 
             ? [...unit.timeline].reverse().find(t => t.status === 'lista') 
             : null;
           const fechaLista = listaEvent?.date ? new Date(listaEvent.date).getTime() : ahora;
           const edadMs = ahora - fechaLista;
-          if (edadMs > 15000) {
+          if (edadMs > 180000) {
             console.log(`⏱️ [#${numUnidad}] Terminada hace ${Math.round(edadMs / 1000)}s. Omitiendo.`);
             notifiedSet.add(docId + '_lista');
             continue;
@@ -1362,6 +1358,8 @@ server.get('/debug', (req, res) => {
     wsReadyState: socketWhatsApp?.ws?.readyState, // 0: CONNECTING, 1: OPEN, 2: CLOSING, 3: CLOSED
     user: socketWhatsApp?.user || null,
     gruposCount: gruposDetectados.length,
+    listenerIniciado,
+    estadosConocidosCount: estadosConocidos.size,
     config: leerConfig()
   });
 });
@@ -1489,5 +1487,9 @@ server.listen(PORT, async () => {
   await restaurarConfigDesdeFirebase();
   await cargarNotificadosDesdeFirebase();
   await inicializarUltimasUnidades();
+  if (!listenerIniciado) {
+    iniciarListenerFirebase();
+    listenerIniciado = true;
+  }
   await iniciarWhatsApp();
 });
