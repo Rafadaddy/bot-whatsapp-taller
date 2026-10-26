@@ -62,7 +62,7 @@ function obtenerFechaHoraMexico() {
   const ahora = new Date();
   const formato = new Intl.DateTimeFormat('en-US', {
     timeZone: 'America/Mexico_City',
-    hour12: false,
+    hourCycle: 'h23',
     weekday: 'short',
     hour: 'numeric',
     minute: 'numeric',
@@ -76,7 +76,8 @@ function obtenerFechaHoraMexico() {
   
   const diaSemanaMap = { 'Sun': 0, 'Mon': 1, 'Tue': 2, 'Wed': 3, 'Thu': 4, 'Fri': 5, 'Sat': 6 };
   const diaSemana = diaSemanaMap[parts.weekday] ?? ahora.getDay();
-  const hora = parseInt(parts.hour, 10);
+  let hora = parseInt(parts.hour, 10);
+  if (hora === 24) hora = 0;
   const minuto = parseInt(parts.minute, 10);
 
   return { diaSemana, hora, minuto };
@@ -199,7 +200,13 @@ async function enviarReporteEstatusTaller(manual = false) {
     return false;
   }
 
-  console.log(`📋 ${manual ? '[MANUAL]' : '[AUTOMÁTICO 9:00 AM]'} Generando reporte de estatus del taller...`);
+  // NUNCA enviar automáticamente fuera del horario laboral
+  if (!manual && (!botActivo || !estaEnHorarioLaboral())) {
+    console.warn('⚠️ Intento de reporte automático cancelado: fuera de horario laboral.');
+    return false;
+  }
+
+  console.log(`📋 ${manual ? '[MANUAL]' : '[AUTOMÁTICO]'} Generando reporte de estatus del taller...`);
   const textoReporte = await generarTextoEstatusTaller();
   if (!textoReporte) {
     console.log('ℹ️ No hay unidades activas en taller para reportar.');
@@ -211,7 +218,7 @@ async function enviarReporteEstatusTaller(manual = false) {
   if (ok) {
     const ahoraMx = new Date().toLocaleDateString('es-CA', { timeZone: 'America/Mexico_City' }); // YYYY-MM-DD
     ultimaFechaReporteEstatus = ahoraMx;
-    registrarActividad('reporte', `Estatus taller enviado a Mecánicos (${manual ? 'Manual' : '9:00 AM'})`, true);
+    registrarActividad('reporte', `Estatus taller enviado a Mecánicos (${manual ? 'Manual' : 'Automático'})`, true);
     try {
       await setDoc(doc(firestore, '_system', 'whatsapp_config'), {
         ...config,
@@ -224,6 +231,9 @@ async function enviarReporteEstatusTaller(manual = false) {
 }
 
 async function checarEnvioReporteDiario() {
+  // BLOQUEO ABSOLUTO: Nunca enviar si el bot no está activo o está fuera de horario laboral
+  if (!botActivo || !estaEnHorarioLaboral()) return;
+
   const { diaSemana, hora, minuto } = obtenerFechaHoraMexico();
   const hoyStr = new Date().toLocaleDateString('es-CA', { timeZone: 'America/Mexico_City' }); // YYYY-MM-DD
 
@@ -265,30 +275,56 @@ function esperarConexion(timeoutMs = 15000) {
 }
 
 function encolarPendiente(item) {
+  // REGLA ESTRICTA: Fuera de horario o en pausa NUNCA se encola nada
+  if (!botActivo || !estaEnHorarioLaboral()) {
+    return;
+  }
   if (!colaPendientes.some(p => p.clave === item.clave)) {
-    console.log(`📥 Guardando en cola pendiente para reintentar al reconectar: "${item.texto}"`);
-    registrarActividad('espera', `En cola: ${item.texto}`, false);
-    colaPendientes.push(item);
+    console.log(`📥 Guardando en cola inmediata (máx 15s) para reconexión: "${item.texto}"`);
+    registrarActividad('espera', `En cola (15s): ${item.texto}`, false);
+    colaPendientes.push({
+      ...item,
+      timestamp: item.timestamp || Date.now()
+    });
   }
 }
 
 async function procesarColaPendientes() {
   if (colaPendientes.length === 0 || estadoConexion !== 'conectado') return;
-  console.log(`📋 Procesando ${colaPendientes.length} mensaje(s) pendiente(s) en cola...`);
-  const pendientes = [...colaPendientes];
+
+  // Si está fuera de horario, limpiar inmediatamente sin enviar nada
+  if (!botActivo || !estaEnHorarioLaboral()) {
+    console.log(`🧹 Limpiando ${colaPendientes.length} mensaje(s) retenidos porque el bot está fuera de horario.`);
+    colaPendientes = [];
+    return;
+  }
+
+  const ahora = Date.now();
+  // REGLA ESTRICTA: Descartar cualquier mensaje que tenga más de 15 segundos
+  const pendientesValidos = [];
+  for (const p of colaPendientes) {
+    const edadMs = ahora - (p.timestamp || 0);
+    if (edadMs <= 15000) {
+      pendientesValidos.push(p);
+    } else {
+      console.log(`⏱️ [DESCARTADO >15s] Mensaje caducado hace ${Math.round(edadMs / 1000)}s: "${p.texto}". No se enviará.`);
+      await guardarNotificadoEnFirebase(p.clave);
+    }
+  }
+
   colaPendientes = [];
-  for (const item of pendientes) {
+  if (pendientesValidos.length === 0) return;
+
+  console.log(`📋 Procesando ${pendientesValidos.length} mensaje(s) reciente(s) en cola...`);
+  for (const item of pendientesValidos) {
     try {
-      console.log(`🚀 Despachando mensaje retenido de cola: "${item.texto}"`);
+      console.log(`🚀 Despachando mensaje inmediato: "${item.texto}"`);
       const ok = await enviarMensajeGrupo(item.grupoId, item.texto);
       if (ok) {
         await guardarNotificadoEnFirebase(item.clave);
-      } else {
-        colaPendientes.push(item);
       }
     } catch (e) {
       console.error('Error al procesar mensaje de cola:', e.message);
-      colaPendientes.push(item);
     }
   }
 }
@@ -615,9 +651,9 @@ async function iniciarWhatsApp() {
 
 // Enviar mensajes a WhatsApp
 async function enviarMensajeGrupo(grupoId, texto) {
-  if (!botActivo) {
-    console.log(`⏸️ [PAUSADO] El bot está en pausa. Mensaje no enviado: "${texto}"`);
-    registrarActividad('pausa', `Bot pausado: ${texto}`, false);
+  if (!botActivo || (modoHorarioAutomatico && !estaEnHorarioLaboral())) {
+    console.log(`⏸️ [PAUSADO/FUERA DE HORARIO] Mensaje no enviado: "${texto}"`);
+    registrarActividad('pausa', `Fuera de turno: ${texto}`, false);
     return false;
   }
 
@@ -677,19 +713,30 @@ async function notificarIngresoSiAplica(docId, unit) {
   if (notifiedSet.has(clave)) return false;
 
   const numUnidad = unit.unit_number || 'S/N';
+
+  // REGLA ESTRICTA ANTI-DESVELO: Si el taller está cerrado o el bot pausado, NUNCA enviar ni encolar
+  if (!botActivo || !estaEnHorarioLaboral()) {
+    console.log(`⏸️ [FUERA DE HORARIO] #${numUnidad} registrada con el taller cerrado. Descartando notificación.`);
+    notifiedSet.add(clave);
+    await guardarNotificadoEnFirebase(clave);
+    return false;
+  }
+
   const mensaje = construirMensajeIngreso(unit, numUnidad);
   actualizarUltimaUnidad('ingreso', { numero: numUnidad, mensaje });
-  console.log(`\n🆕 [NUEVA UNIDAD] #${numUnidad} -> Enviando a WhatsApp...`);
+  console.log(`\n🆕 [NUEVA UNIDAD EN VIVO] #${numUnidad} -> Enviando a WhatsApp...`);
   config = leerConfig();
   const ok = await enviarMensajeGrupo(config.grupoIngresosId, mensaje);
   if (ok) {
     await guardarNotificadoEnFirebase(clave);
     return true;
   } else {
+    // Solo reintentar en cola si WhatsApp se estaba reconectando en ese instante (máx 15s)
     encolarPendiente({
       grupoId: config.grupoIngresosId,
       texto: mensaje,
-      clave
+      clave,
+      timestamp: Date.now()
     });
     return false;
   }
@@ -700,19 +747,30 @@ async function notificarListaSiAplica(docId, unit) {
   if (notifiedSet.has(clave)) return false;
 
   const numUnidad = unit.unit_number || 'S/N';
+
+  // REGLA ESTRICTA ANTI-DESVELO: Si el taller está cerrado o el bot pausado, NUNCA enviar ni encolar
+  if (!botActivo || !estaEnHorarioLaboral()) {
+    console.log(`⏸️ [FUERA DE HORARIO] #${numUnidad} lista con el taller cerrado. Descartando notificación.`);
+    notifiedSet.add(clave);
+    await guardarNotificadoEnFirebase(clave);
+    return false;
+  }
+
   const mensaje = `${numUnidad} lista`;
   actualizarUltimaUnidad('lista', { numero: numUnidad, mensaje });
-  console.log(`\n🎉 [UNIDAD LISTA] #${numUnidad} lista -> Enviando a WhatsApp...`);
+  console.log(`\n🎉 [UNIDAD LISTA EN VIVO] #${numUnidad} lista -> Enviando a WhatsApp...`);
   config = leerConfig();
   const ok = await enviarMensajeGrupo(config.grupoListasId, mensaje);
   if (ok) {
     await guardarNotificadoEnFirebase(clave);
     return true;
   } else {
+    // Solo reintentar en cola si WhatsApp se estaba reconectando en ese instante (máx 15s)
     encolarPendiente({
       grupoId: config.grupoListasId,
       texto: mensaje,
-      clave
+      clave,
+      timestamp: Date.now()
     });
     return false;
   }
@@ -725,9 +783,6 @@ function iniciarListenerFirebase() {
   const q = query(collection(firestore, 'units'), where('status', '!=', 'entregada'));
 
   onSnapshot(q, async (snapshot) => {
-    const ahora = Date.now();
-    const limiteReciente = ahora - (45 * 60 * 1000); // Ventana de 45 minutos hacia atrás
-
     if (esCargaInicial) {
       snapshot.docs.forEach((docSnap) => {
         const data = docSnap.data();
@@ -737,69 +792,32 @@ function iniciarListenerFirebase() {
         });
       });
       esCargaInicial = false;
-      console.log(`⚡ Sincronización inicial: ${estadosConocidos.size} unidades en memoria.`);
+      console.log(`⚡ Sincronización inicial: ${estadosConocidos.size} unidades activas en memoria.`);
 
-      // A) Marcar unidades viejas (> 45 min) como ya notificadas para evitar spam de días anteriores
-      let huboMarcadoViejo = false;
+      // REGLA DE ORO DEL USUARIO: "Lo que ya pasó, pasó. No mandar cosas atrasadas".
+      // Marcar ABSOLUTAMENTE TODAS las unidades ya existentes como notificadas.
+      // Cero recuperación de backlog de horas anteriores.
       for (const docSnap of snapshot.docs) {
         const docId = docSnap.id;
         const unit = docSnap.data();
-        const fechaCreacion = unit.created_date ? new Date(unit.created_date).getTime() : 0;
-
-        if (fechaCreacion < limiteReciente && !notifiedSet.has(docId + '_ingreso')) {
-          notifiedSet.add(docId + '_ingreso');
-          huboMarcadoViejo = true;
-        }
-
+        notifiedSet.add(docId + '_ingreso');
         if (unit.status === 'lista') {
-          const listaEvent = Array.isArray(unit.timeline) 
-            ? [...unit.timeline].reverse().find(t => t.status === 'lista') 
-            : null;
-          const fechaLista = listaEvent?.date ? new Date(listaEvent.date).getTime() : fechaCreacion;
-          if (fechaLista < limiteReciente && !notifiedSet.has(docId + '_lista')) {
-            notifiedSet.add(docId + '_lista');
-            huboMarcadoViejo = true;
-          }
+          notifiedSet.add(docId + '_lista');
         }
       }
 
-      if (huboMarcadoViejo) {
-        const items = Array.from(notifiedSet).slice(-500);
-        await setDoc(doc(firestore, '_system', 'whatsapp_notified'), {
-          items,
-          updated_at: new Date().toISOString()
-        }).catch(() => {});
-      }
-
-      // B) RECUPERACIÓN AUTOMÁTICA: Si alguna unidad se creó o quedó lista en los últimos 45 min
-      // (por ejemplo mientras el servidor Render dormía o se reiniciaba) y no se había notificado,
-      // enviarla de inmediato para no perder ninguna unidad.
-      for (const docSnap of snapshot.docs) {
-        const docId = docSnap.id;
-        const unit = docSnap.data();
-        const fechaCreacion = unit.created_date ? new Date(unit.created_date).getTime() : 0;
-
-        if (fechaCreacion >= limiteReciente && !notifiedSet.has(docId + '_ingreso')) {
-          console.log(`⚡ Recuperando unidad reciente #${unit.unit_number || 'S/N'} creada mientras dormía...`);
-          await notificarIngresoSiAplica(docId, unit);
-        }
-
-        if (unit.status === 'lista' && !notifiedSet.has(docId + '_lista')) {
-          const listaEvent = Array.isArray(unit.timeline) 
-            ? [...unit.timeline].reverse().find(t => t.status === 'lista') 
-            : null;
-          const fechaLista = listaEvent?.date ? new Date(listaEvent.date).getTime() : fechaCreacion;
-          if (fechaLista >= limiteReciente) {
-            console.log(`⚡ Recuperando unidad terminada #${unit.unit_number || 'S/N'} lista mientras dormía...`);
-            await notificarListaSiAplica(docId, unit);
-          }
-        }
-      }
+      const items = Array.from(notifiedSet).slice(-500);
+      await setDoc(doc(firestore, '_system', 'whatsapp_notified'), {
+        items,
+        updated_at: new Date().toISOString()
+      }).catch(() => {});
       return;
     }
 
-    // EVENTOS EN TIEMPO REAL
+    // EVENTOS EN TIEMPO REAL ÚNICAMENTE
     const changes = snapshot.docChanges();
+    const ahora = Date.now();
+
     for (const change of changes) {
       const docId = change.doc.id;
       const unit = change.doc.data();
@@ -811,6 +829,16 @@ function iniciarListenerFirebase() {
           status: unit.status,
           unit_number: numUnidad
         });
+
+        // Solo notificar si la unidad fue creada en los últimos 15 segundos (en tiempo real estricto)
+        const fechaCreacion = unit.created_date ? new Date(unit.created_date).getTime() : ahora;
+        const edadMs = ahora - fechaCreacion;
+        if (edadMs > 15000) {
+          console.log(`⏱️ [#${numUnidad}] Registro atrasado (hace ${Math.round(edadMs / 1000)}s). Omitiendo.`);
+          notifiedSet.add(docId + '_ingreso');
+          continue;
+        }
+
         await notificarIngresoSiAplica(docId, unit);
       }
 
@@ -826,6 +854,18 @@ function iniciarListenerFirebase() {
         });
 
         if (estatusActual === 'lista' && estatusAnterior !== 'lista') {
+          // Solo notificar si fue marcada lista en los últimos 15 segundos
+          const listaEvent = Array.isArray(unit.timeline) 
+            ? [...unit.timeline].reverse().find(t => t.status === 'lista') 
+            : null;
+          const fechaLista = listaEvent?.date ? new Date(listaEvent.date).getTime() : ahora;
+          const edadMs = ahora - fechaLista;
+          if (edadMs > 15000) {
+            console.log(`⏱️ [#${numUnidad}] Terminada hace ${Math.round(edadMs / 1000)}s. Omitiendo.`);
+            notifiedSet.add(docId + '_lista');
+            continue;
+          }
+
           await notificarListaSiAplica(docId, unit);
         }
       }
