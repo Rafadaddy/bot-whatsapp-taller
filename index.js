@@ -898,6 +898,7 @@ server.use(express.json());
 server.use(express.urlencoded({ extended: true }));
 
 server.get('/', (req, res) => {
+  actualizarEstadoHorario(false);
   config = leerConfig();
   res.send(`
 <!DOCTYPE html>
@@ -1019,27 +1020,36 @@ server.get('/', (req, res) => {
         </div>
       `)}
 
-      <!-- BOTONES ESPECÍFICOS Y DIRECTOS (CERO CONFUSIÓN) -->
+      <!-- BOTONES DINÁMICOS PLAY / PAUSA (CERO CONFUSIÓN) -->
       <div style="display: flex; flex-direction: column; gap: 8px;">
-        <!-- BOTÓN ROJO PRINCIPAL: DESACTIVAR BOT -->
-        <form action="/desactivar-bot" method="POST" style="margin: 0;">
-          <button type="submit" class="btn" style="background: #dc2626; color: white; font-weight: bold; font-size: 13px; padding: 12px 6px; width: 100%; border-radius: 8px; border: none; cursor: pointer; box-shadow: 0 2px 8px rgba(220,38,38,0.4); display: flex; align-items: center; justify-content: center; gap: 6px;">
-            🛑 DESACTIVAR BOT (APAGAR COMPLETAMENTE)
-          </button>
-        </form>
+        ${botActivo ? `
+          <!-- SI EL BOT ESTÁ ENVIANDO: BOTÓN PARA PAUSAR -->
+          <form action="/desactivar-bot" method="POST" style="margin: 0;">
+            <button type="submit" class="btn" style="background: #dc2626; color: white; font-weight: bold; font-size: 14px; padding: 13px 6px; width: 100%; border-radius: 8px; border: none; cursor: pointer; box-shadow: 0 4px 12px rgba(220,38,38,0.4); display: flex; align-items: center; justify-content: center; gap: 8px;">
+              ⏸️ PAUSAR BOT (DETENER ENVÍOS)
+            </button>
+          </form>
+        ` : `
+          <!-- SI EL BOT ESTÁ PAUSADO: BOTÓN PLAY PARA INICIAR -->
+          <form action="${estaEnHorarioLaboral() ? '/activar-horario' : '/activar-bot'}" method="POST" style="margin: 0;">
+            <button type="submit" class="btn" style="background: #059669; color: white; font-weight: bold; font-size: 14px; padding: 13px 6px; width: 100%; border-radius: 8px; border: none; cursor: pointer; box-shadow: 0 4px 12px rgba(5,150,105,0.4); display: flex; align-items: center; justify-content: center; gap: 8px;">
+              ▶️ INICIAR BOT (PLAY / ACTIVAR)
+            </button>
+          </form>
+        `}
 
         <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 8px;">
-          <!-- BOTÓN AZUL: HORARIO AUTOMÁTICO -->
+          <!-- BOTÓN HORARIO AUTOMÁTICO -->
           <form action="/activar-horario" method="POST" style="margin: 0;">
             <button type="submit" class="btn" style="background: ${modoHorarioAutomatico ? '#1e40af' : '#1e293b'}; color: white; font-weight: 600; font-size: 12px; padding: 10px 4px; width: 100%; border-radius: 8px; border: 1px solid ${modoHorarioAutomatico ? '#60a5fa' : '#475569'}; cursor: pointer;">
-              ⏰ Usar Horario Auto
+              ⏰ Modo Horario Auto
             </button>
           </form>
 
-          <!-- BOTÓN VERDE: ACTIVAR MANUAL -->
+          <!-- BOTÓN MODO FORZADO 24/7 -->
           <form action="/activar-bot" method="POST" style="margin: 0;">
             <button type="submit" class="btn" style="background: ${(!modoHorarioAutomatico && botActivo) ? '#059669' : '#1e293b'}; color: white; font-weight: 600; font-size: 12px; padding: 10px 4px; width: 100%; border-radius: 8px; border: 1px solid ${(!modoHorarioAutomatico && botActivo) ? '#34d399' : '#475569'}; cursor: pointer;">
-              🟢 Encender Forzado
+              🟢 Modo Forzado 24/7
             </button>
           </form>
         </div>
