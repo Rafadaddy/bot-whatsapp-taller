@@ -975,39 +975,62 @@ server.get('/', (req, res) => {
   <div id="tab-monitor">
     <div class="card">
       <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
-        <span style="font-size: 13px; font-weight: bold; color: #94a3b8;">ESTADO DEL HORARIO:</span>
-        <span style="font-size: 11px; padding: 3px 8px; border-radius: 12px; background: ${modoHorarioAutomatico ? '#065f46' : '#854d0e'}; color: white; font-weight: bold;">
-          ${modoHorarioAutomatico ? '🕒 Horario Automático' : '👤 Modo Manual'}
+        <span style="font-size: 13px; font-weight: bold; color: #94a3b8;">CONTROL DE OPERACIÓN:</span>
+        <span style="font-size: 11px; padding: 3px 8px; border-radius: 12px; background: ${!botActivo && !modoHorarioAutomatico ? '#dc2626' : (modoHorarioAutomatico ? '#059669' : '#d97706')}; color: white; font-weight: bold;">
+          ${!botActivo && !modoHorarioAutomatico ? '🛑 APAGADO / DESACTIVADO' : (modoHorarioAutomatico ? '🕒 Horario Automático' : '🟢 Manual Forzado')}
         </span>
       </div>
 
-      <div style="font-size: 12px; color: #cbd5e1; margin-bottom: 12px; line-height: 1.5; background: #0f172a; padding: 10px; border-radius: 8px; border: 1px solid #334155;">
-        📅 <b>L-V:</b> ${horarioConfig.semanaInicio || '09:00'} a ${horarioConfig.semanaFin || '20:00'} &nbsp;|&nbsp; 
-        📅 <b>S-D:</b> ${horarioConfig.finSemanaInicio || '09:00'} a ${horarioConfig.finSemanaFin || '17:00'}<br/>
-        <div style="margin-top: 4px; font-weight: bold;">
-          ${modoHorarioAutomatico ? (
-            botActivo 
-              ? '<span style="color: #34d399;">🟢 Dentro de turno laboral (Enviando mensajes)</span>'
-              : '<span style="color: #fbbf24;">⏸️ Fuera de turno laboral (En pausa automática)</span>'
-          ) : (
-            botActivo
-              ? '<span style="color: #34d399;">🟢 FORZADO ACTIVO (Manual)</span>'
-              : '<span style="color: #f87171;">⏸️ FORZADO EN PAUSA (Manual)</span>'
-          )}
+      <!-- Cuadro de estado actual grande y 100% visible -->
+      ${!modoHorarioAutomatico && !botActivo ? `
+        <div style="background: #450a0a; border: 2px solid #ef4444; border-radius: 10px; padding: 12px; margin-bottom: 12px; text-align: center;">
+          <div style="font-size: 15px; font-weight: 900; color: #f87171; margin-bottom: 4px;">🛑 BOT TOTALMENTE DESACTIVADO</div>
+          <div style="font-size: 12px; color: #fca5a5;">El bot está 100% apagado en pausa manual. No enviará ningún mensaje por WhatsApp.</div>
         </div>
-      </div>
+      ` : (modoHorarioAutomatico ? `
+        <div style="background: #0f172a; border: 2px solid ${botActivo ? '#10b981' : '#f59e0b'}; border-radius: 10px; padding: 12px; margin-bottom: 12px;">
+          <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
+            <span style="font-size: 13px; font-weight: bold; color: ${botActivo ? '#34d399' : '#fbbf24'};">
+              ${botActivo ? '🟢 HORARIO AUTO: DENTRO DE TURNO' : '⏸️ HORARIO AUTO: FUERA DE TURNO (PAUSADO)'}
+            </span>
+            <span style="font-size: 11px; color: #94a3b8;">${botActivo ? 'Enviando mensajes' : 'En pausa nocturna'}</span>
+          </div>
+          <div style="font-size: 11px; color: #cbd5e1; line-height: 1.4;">
+            📅 <b>Lunes a Viernes:</b> ${horarioConfig.semanaInicio || '09:00'} a ${horarioConfig.semanaFin || '20:00'}<br/>
+            📅 <b>Sábado y Domingo:</b> ${horarioConfig.finSemanaInicio || '09:00'} a ${horarioConfig.finSemanaFin || '17:00'}
+          </div>
+        </div>
+      ` : `
+        <div style="background: #064e3b; border: 2px solid #10b981; border-radius: 10px; padding: 12px; margin-bottom: 12px; text-align: center;">
+          <div style="font-size: 15px; font-weight: 900; color: #34d399; margin-bottom: 4px;">🟢 BOT FORZADO ACTIVO</div>
+          <div style="font-size: 12px; color: #a7f3d0;">El bot está encendido manualmente las 24 horas continuas sin importar el reloj.</div>
+        </div>
+      `)}
 
-      <div style="display: flex; gap: 8px;">
-        <form action="/toggle-horario" method="POST" style="flex: 1; margin: 0;">
-          <button type="submit" class="btn" style="background: ${modoHorarioAutomatico ? '#334155' : '#059669'}; font-size: 12px; padding: 9px 4px; margin: 0;">
-            ${modoHorarioAutomatico ? 'Cambiar a Manual' : 'Usar Horario Auto'}
+      <!-- BOTONES ESPECÍFICOS Y DIRECTOS (CERO CONFUSIÓN) -->
+      <div style="display: flex; flex-direction: column; gap: 8px;">
+        <!-- BOTÓN ROJO PRINCIPAL: DESACTIVAR BOT -->
+        <form action="/desactivar-bot" method="POST" style="margin: 0;">
+          <button type="submit" class="btn" style="background: #dc2626; color: white; font-weight: bold; font-size: 13px; padding: 12px 6px; width: 100%; border-radius: 8px; border: none; cursor: pointer; box-shadow: 0 2px 8px rgba(220,38,38,0.4); display: flex; align-items: center; justify-content: center; gap: 6px;">
+            🛑 DESACTIVAR BOT (APAGAR COMPLETAMENTE)
           </button>
         </form>
-        <form action="/toggle" method="POST" style="flex: 1; margin: 0;">
-          <button type="submit" class="btn ${botActivo ? 'btn-toggle-on' : 'btn-toggle-off'}" style="font-size: 12px; padding: 9px 4px; margin: 0;">
-            ${botActivo ? 'Pausar Bot' : 'Activar Bot'}
-          </button>
-        </form>
+
+        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 8px;">
+          <!-- BOTÓN AZUL: HORARIO AUTOMÁTICO -->
+          <form action="/activar-horario" method="POST" style="margin: 0;">
+            <button type="submit" class="btn" style="background: ${modoHorarioAutomatico ? '#1e40af' : '#1e293b'}; color: white; font-weight: 600; font-size: 12px; padding: 10px 4px; width: 100%; border-radius: 8px; border: 1px solid ${modoHorarioAutomatico ? '#60a5fa' : '#475569'}; cursor: pointer;">
+              ⏰ Usar Horario Auto
+            </button>
+          </form>
+
+          <!-- BOTÓN VERDE: ACTIVAR MANUAL -->
+          <form action="/activar-bot" method="POST" style="margin: 0;">
+            <button type="submit" class="btn" style="background: ${(!modoHorarioAutomatico && botActivo) ? '#059669' : '#1e293b'}; color: white; font-weight: 600; font-size: 12px; padding: 10px 4px; width: 100%; border-radius: 8px; border: 1px solid ${(!modoHorarioAutomatico && botActivo) ? '#34d399' : '#475569'}; cursor: pointer;">
+              🟢 Encender Forzado
+            </button>
+          </form>
+        </div>
       </div>
     </div>
 
@@ -1221,6 +1244,37 @@ server.get('/', (req, res) => {
 
 server.post('/cargar-grupos', async (req, res) => {
   await actualizarGrupos();
+  res.redirect('/');
+});
+
+server.post('/desactivar-bot', async (req, res) => {
+  modoHorarioAutomatico = false;
+  forzadoManual = false;
+  botActivo = false;
+  colaPendientes = [];
+  registrarActividad('modo', '🛑 BOT TOTALMENTE DESACTIVADO (APAGADO)', false);
+  console.log('🛑 [MODO] Bot desactivado manualmente por el usuario.');
+  await guardarEstadoHorarioEnFirebase();
+  res.redirect('/');
+});
+
+server.post('/activar-bot', async (req, res) => {
+  modoHorarioAutomatico = false;
+  forzadoManual = true;
+  botActivo = true;
+  registrarActividad('modo', '🟢 BOT ENCENDIDO FORZADO (MANUAL)', true);
+  console.log('🟢 [MODO] Bot encendido manualmente por el usuario.');
+  await guardarEstadoHorarioEnFirebase();
+  res.redirect('/');
+});
+
+server.post('/activar-horario', async (req, res) => {
+  modoHorarioAutomatico = true;
+  forzadoManual = null;
+  actualizarEstadoHorario(true);
+  registrarActividad('modo', '⏰ MODO HORARIO AUTOMÁTICO RESTAURADO', true);
+  console.log('⏰ [MODO] Horario automático restaurado por el usuario.');
+  await guardarEstadoHorarioEnFirebase();
   res.redirect('/');
 });
 
