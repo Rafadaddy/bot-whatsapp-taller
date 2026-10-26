@@ -554,7 +554,10 @@ async function actualizarGrupos() {
       id: g.id,
       name: g.subject
     }));
-    console.log(`📋 ¡${gruposDetectados.length} grupos detectados con éxito!`);
+    for (const [id, meta] of Object.entries(grupos)) {
+      groupMetadataCache.set(id, meta);
+    }
+    console.log(`📋 ¡${gruposDetectados.length} grupos detectados y guardados en memoria con éxito!`);
   } catch (e) {
     console.warn('Reintentando sincronizar grupos...', e.message);
   }
@@ -582,16 +585,7 @@ async function iniciarWhatsApp() {
     keepAliveIntervalMs: 30000,
     syncFullHistory: false,
     markOnlineOnConnect: false,
-    cachedGroupMetadata: async (jid) => {
-      if (groupMetadataCache.has(jid)) return groupMetadataCache.get(jid);
-      try {
-        const meta = await socketWhatsApp.groupMetadata(jid);
-        groupMetadataCache.set(jid, meta);
-        return meta;
-      } catch (e) {
-        return undefined;
-      }
-    },
+    cachedGroupMetadata: async (jid) => groupMetadataCache.get(jid),
     getMessage: async (key) => {
       if (key && key.id && mensajeStore.has(key.id)) {
         return mensajeStore.get(key.id);
