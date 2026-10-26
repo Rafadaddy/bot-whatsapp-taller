@@ -1,3 +1,4 @@
+process.env.TZ = 'America/Mexico_City';
 import makeWASocket, { Browsers, DisconnectReason, useMultiFileAuthState } from '@whiskeysockets/baileys';
 import qrcodeTerminal from 'qrcode-terminal';
 import QRCode from 'qrcode';
@@ -685,7 +686,7 @@ async function enviarMensajeGrupo(grupoId, texto) {
         mensajeStore.delete(firstKey);
       }
     }
-    console.log(`📨 [${new Date().toLocaleTimeString('es-MX')}] Enviado a ${grupoId}: "${texto}"`);
+    console.log(`📨 [${new Date().toLocaleTimeString('es-MX', { timeZone: 'America/Mexico_City' })}] Enviado a ${grupoId}: "${texto}"`);
     registrarActividad('envio', texto, true);
     return true;
   } catch (error) {
@@ -1383,7 +1384,7 @@ server.get('/debug', (req, res) => {
 server.get('/probar-entrega', async (req, res) => {
   config = leerConfig();
   const grupo = req.query.grupo === 'listas' ? config.grupoListasId : config.grupoIngresosId;
-  const texto = `🧪 Diagnóstico de entrega [${new Date().toLocaleTimeString('es-MX')}]`;
+  const texto = `🧪 Diagnóstico de entrega [${new Date().toLocaleTimeString('es-MX', { timeZone: 'America/Mexico_City', hour12: true })}]`;
 
   try {
     let ackRecibido = false;
@@ -1448,7 +1449,7 @@ server.get('/group-info', async (req, res) => {
 server.get('/force-send', async (req, res) => {
   config = leerConfig();
   try {
-    const r = await socketWhatsApp.sendMessage(config.grupoIngresosId, { text: `🔔 Prueba directa: ${new Date().toLocaleTimeString('es-MX')}` });
+    const r = await socketWhatsApp.sendMessage(config.grupoIngresosId, { text: `🔔 Prueba directa: ${new Date().toLocaleTimeString('es-MX', { timeZone: 'America/Mexico_City', hour12: true })}` });
     res.json({ ok: true, messageId: r?.key?.id, status: r?.status });
   } catch (e) {
     res.json({ ok: false, error: e.message });
@@ -1457,13 +1458,13 @@ server.get('/force-send', async (req, res) => {
 
 server.post('/probar-ingresos', async (req, res) => {
   config = leerConfig();
-  await enviarMensajeGrupo(config.grupoIngresosId, `🧪 Prueba de conexión - ${new Date().toLocaleTimeString('es-MX')}`);
+  await enviarMensajeGrupo(config.grupoIngresosId, `🧪 Prueba de conexión - ${new Date().toLocaleTimeString('es-MX', { timeZone: 'America/Mexico_City', hour12: true })}`);
   res.redirect('/');
 });
 
 server.post('/probar-listas', async (req, res) => {
   config = leerConfig();
-  await enviarMensajeGrupo(config.grupoListasId, `🧪 Prueba de conexión - ${new Date().toLocaleTimeString('es-MX')}`);
+  await enviarMensajeGrupo(config.grupoListasId, `🧪 Prueba de conexión - ${new Date().toLocaleTimeString('es-MX', { timeZone: 'America/Mexico_City', hour12: true })}`);
   res.redirect('/');
 });
 
