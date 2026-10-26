@@ -710,9 +710,18 @@ async function notificarIngresoSiAplica(docId, unit) {
 
   const numUnidad = unit.unit_number || 'S/N';
 
+  // Excluir entregadas, listas, paros técnicos y trámites legales (petición expresa del usuario)
+  if (['entregada', 'lista', 'paro_tecnico', 'tramite_legal'].includes(unit.status)) {
+    console.log(`⏸️ [#${numUnidad}] Unidad con estatus '${unit.status}'. Omitiendo notificación de ingreso.`);
+    notifiedSet.add(clave);
+    await guardarNotificadoEnFirebase(clave);
+    return false;
+  }
+
   // REGLA ESTRICTA ANTI-DESVELO: Si el taller está cerrado o el bot pausado, NUNCA enviar ni encolar
   if (!botActivo || !estaEnHorarioLaboral()) {
-    console.log(`⏸️ [FUERA DE HORARIO] #${numUnidad} registrada con el taller cerrado. Descartando notificación.`);
+    console.log(`⏸️ [FUERA DE HORARIO / APAGADO] #${numUnidad} registrada con bot inactivo o taller cerrado. Descartando notificación.`);
+    registrarActividad('descarte', `#${numUnidad} omitida (bot apagado o fuera de turno)`, false);
     notifiedSet.add(clave);
     await guardarNotificadoEnFirebase(clave);
     return false;
@@ -746,7 +755,8 @@ async function notificarListaSiAplica(docId, unit) {
 
   // REGLA ESTRICTA ANTI-DESVELO: Si el taller está cerrado o el bot pausado, NUNCA enviar ni encolar
   if (!botActivo || !estaEnHorarioLaboral()) {
-    console.log(`⏸️ [FUERA DE HORARIO] #${numUnidad} lista con el taller cerrado. Descartando notificación.`);
+    console.log(`⏸️ [FUERA DE HORARIO / APAGADO] #${numUnidad} lista con bot inactivo o taller cerrado. Descartando notificación.`);
+    registrarActividad('descarte', `Lista #${numUnidad} omitida (bot apagado o fuera de turno)`, false);
     notifiedSet.add(clave);
     await guardarNotificadoEnFirebase(clave);
     return false;
@@ -792,7 +802,7 @@ function iniciarListenerFirebase() {
 
       // REGLA DE ORO DEL USUARIO: "Lo que ya pasó, pasó. No mandar cosas atrasadas".
       // Marcar ABSOLUTAMENTE TODAS las unidades ya existentes como notificadas.
-      // Cero recuperación de backlog de horas anteriores.
+      // Cero recuperación de backlog de horas anteriores ni duplicaciones.
       for (const docSnap of snapshot.docs) {
         const docId = docSnap.id;
         const unit = docSnap.data();
@@ -812,7 +822,6 @@ function iniciarListenerFirebase() {
 
     // EVENTOS EN TIEMPO REAL ÚNICAMENTE
     const changes = snapshot.docChanges();
-    const ahora = Date.now();
 
     for (const change of changes) {
       const docId = change.doc.id;
@@ -821,20 +830,26 @@ function iniciarListenerFirebase() {
 
       // NUEVA UNIDAD
       if (change.type === 'added') {
+        // Si ya existía desde el inicio o por reconexión interna, no duplicar
+        if (estadosConocidos.has(docId)) {
+          estadosConocidos.set(docId, {
+            status: unit.status,
+            unit_number: numUnidad
+          });
+          continue;
+        }
+
         estadosConocidos.set(docId, {
           status: unit.status,
           unit_number: numUnidad
         });
 
-        // Solo notificar si fue creada recientemente (ventana de 3 min para absorber latencia de red móvil)
-        const fechaCreacion = unit.created_date ? new Date(unit.created_date).getTime() : ahora;
-        const edadMs = ahora - fechaCreacion;
-        if (edadMs > 180000) {
-          console.log(`⏱️ [#${numUnidad}] Registro atrasado (hace ${Math.round(edadMs / 1000)}s). Omitiendo.`);
-          notifiedSet.add(docId + '_ingreso');
+        // Si ya fue notificado previamente, omitir
+        if (notifiedSet.has(docId + '_ingreso')) {
           continue;
         }
 
+        console.log(`🆕 [NUEVA UNIDAD EN VIVO] #${numUnidad} detectada.`);
         await notificarIngresoSiAplica(docId, unit);
       }
 
@@ -850,18 +865,12 @@ function iniciarListenerFirebase() {
         });
 
         if (estatusActual === 'lista' && estatusAnterior !== 'lista') {
-          // Solo notificar si fue marcada lista recientemente (ventana de 3 min)
-          const listaEvent = Array.isArray(unit.timeline) 
-            ? [...unit.timeline].reverse().find(t => t.status === 'lista') 
-            : null;
-          const fechaLista = listaEvent?.date ? new Date(listaEvent.date).getTime() : ahora;
-          const edadMs = ahora - fechaLista;
-          if (edadMs > 180000) {
-            console.log(`⏱️ [#${numUnidad}] Terminada hace ${Math.round(edadMs / 1000)}s. Omitiendo.`);
-            notifiedSet.add(docId + '_lista');
+          if (notifiedSet.has(docId + '_lista')) {
+            console.log(`ℹ️ [#${numUnidad}] Ya fue notificada como lista anteriormente. Omitiendo duplicado.`);
             continue;
           }
 
+          console.log(`🎉 [UNIDAD LISTA EN VIVO] #${numUnidad} cambió a 'lista'.`);
           await notificarListaSiAplica(docId, unit);
         }
       }
