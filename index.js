@@ -562,6 +562,8 @@ async function actualizarGrupos() {
 
 // 2. Conexión de WhatsApp
 const mensajeStore = new Map();
+const groupMetadataCache = new Map();
+let ultimasConfirmaciones = [];
 
 async function iniciarWhatsApp() {
   estadoConexion = 'iniciando';
@@ -573,18 +575,28 @@ async function iniciarWhatsApp() {
   socketWhatsApp = makeWASocket({
     auth: state,
     browser: Browsers.ubuntu('Chrome'),
-    logger: pino({ level: 'silent' }),
+    logger: pino({ level: 'warn' }),
     printQRInTerminal: false,
     connectTimeoutMs: 30000,
     defaultQueryTimeoutMs: 30000,
     keepAliveIntervalMs: 30000,
     syncFullHistory: false,
     markOnlineOnConnect: false,
+    cachedGroupMetadata: async (jid) => {
+      if (groupMetadataCache.has(jid)) return groupMetadataCache.get(jid);
+      try {
+        const meta = await socketWhatsApp.groupMetadata(jid);
+        groupMetadataCache.set(jid, meta);
+        return meta;
+      } catch (e) {
+        return undefined;
+      }
+    },
     getMessage: async (key) => {
       if (key && key.id && mensajeStore.has(key.id)) {
         return mensajeStore.get(key.id);
       }
-      return { conversation: '' };
+      return undefined;
     }
   });
 
@@ -638,8 +650,15 @@ async function iniciarWhatsApp() {
 
   socketWhatsApp.ev.on('messages.update', (updates) => {
     for (const update of updates) {
-      if (update.update?.status >= 2) {
-        console.log(`📬 Mensaje confirmado por WhatsApp (Status ${update.update.status}): ${update.key.id}`);
+      const status = update.update?.status;
+      if (status !== undefined) {
+        console.log(`📬 Mensaje confirmado por WhatsApp (Status ${status}): ${update.key.id}`);
+        ultimasConfirmaciones.unshift({
+          id: update.key.id,
+          status,
+          hora: new Date().toLocaleTimeString('es-MX', { timeZone: 'America/Mexico_City' })
+        });
+        if (ultimasConfirmaciones.length > 25) ultimasConfirmaciones.pop();
       }
     }
   });
@@ -1369,8 +1388,57 @@ server.get('/debug', (req, res) => {
     gruposCount: gruposDetectados.length,
     listenerIniciado,
     estadosConocidosCount: estadosConocidos.size,
-    config: leerConfig()
+    config: leerConfig(),
+    ultimasConfirmaciones
   });
+});
+
+server.get('/probar-entrega', async (req, res) => {
+  config = leerConfig();
+  const grupo = req.query.grupo === 'listas' ? config.grupoListasId : config.grupoIngresosId;
+  const texto = `🧪 Diagnóstico de entrega [${new Date().toLocaleTimeString('es-MX')}]`;
+
+  try {
+    let ackRecibido = false;
+    let statusRecibido = 1;
+
+    const r = await socketWhatsApp.sendMessage(grupo, { text: texto });
+    const msgId = r?.key?.id;
+
+    // Esperar hasta 8 segundos a ver si WhatsApp confirma con status >= 2 (SERVER_ACK)
+    const inicio = Date.now();
+    await new Promise((resolve) => {
+      const listener = (updates) => {
+        for (const u of updates) {
+          if (u.key?.id === msgId) {
+            statusRecibido = u.update?.status;
+            if (statusRecibido >= 2) {
+              ackRecibido = true;
+              socketWhatsApp.ev.off('messages.update', listener);
+              resolve();
+              return;
+            }
+          }
+        }
+      };
+      socketWhatsApp.ev.on('messages.update', listener);
+      setTimeout(() => {
+        socketWhatsApp.ev.off('messages.update', listener);
+        resolve();
+      }, 8000);
+    });
+
+    res.json({
+      ok: true,
+      messageId: msgId,
+      ackRecibido,
+      statusFinal: statusRecibido,
+      duracionMs: Date.now() - inicio,
+      destino: grupo
+    });
+  } catch (e) {
+    res.json({ ok: false, error: e.message });
+  }
 });
 
 server.get('/group-info', async (req, res) => {
