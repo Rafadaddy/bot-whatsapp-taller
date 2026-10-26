@@ -1377,8 +1377,14 @@ server.get('/debug', (req, res) => {
     listenerIniciado,
     estadosConocidosCount: estadosConocidos.size,
     config: leerConfig(),
+    ultimaFechaReporteEstatus,
     ultimasConfirmaciones
   });
+});
+
+server.get('/reset-reporte', (req, res) => {
+  ultimaFechaReporteEstatus = '';
+  res.json({ ok: true, msg: 'Reporte matutino reseteado. Listo para enviarse a la hora programada.' });
 });
 
 server.get('/probar-entrega', async (req, res) => {
