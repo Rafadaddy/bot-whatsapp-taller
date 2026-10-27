@@ -900,6 +900,7 @@ server.use(express.urlencoded({ extended: true }));
 server.get('/', (req, res) => {
   actualizarEstadoHorario(false);
   config = leerConfig();
+  const serverTimestamp = Date.now();
   res.send(`
 <!DOCTYPE html>
 <html lang="es">
@@ -958,6 +959,20 @@ server.get('/', (req, res) => {
         }
       </span>
     </h1>
+
+    <!-- RELOJ OFICIAL EN VIVO DEL BOT (CDMX) -->
+    <div style="background: #0f172a; border: 1px solid #334155; border-radius: 12px; padding: 10px 14px; margin-top: 12px; display: flex; align-items: center; justify-content: space-between; gap: 8px;">
+      <div style="display: flex; align-items: center; gap: 10px;">
+        <span style="font-size: 22px;">🕒</span>
+        <div>
+          <div style="font-size: 10px; font-weight: 700; color: #94a3b8; letter-spacing: 0.5px;">HORA OFICIAL DEL BOT (CDMX)</div>
+          <div id="reloj-fecha-bot" style="font-size: 12px; color: #cbd5e1; font-weight: 600; text-transform: capitalize;">Cargando fecha...</div>
+        </div>
+      </div>
+      <div id="reloj-hora-bot" style="font-family: monospace; font-size: 16px; font-weight: 900; color: #38bdf8; background: #1e293b; padding: 5px 10px; border-radius: 8px; border: 1px solid #475569; letter-spacing: 0.5px; white-space: nowrap;">
+        --:--:--
+      </div>
+    </div>
 
     <div class="tab-bar">
       <button type="button" class="tab-btn active" id="btn-tab-monitor" onclick="cambiarTab('monitor')">
@@ -1258,6 +1273,40 @@ server.get('/', (req, res) => {
     setInterval(() => {
       fetch('/health?from=browser').catch(() => {});
     }, 60000);
+
+    // Reloj oficial del bot sincronizado en vivo (CDMX)
+    const serverBootTime = ${serverTimestamp};
+    const clientBootTime = Date.now();
+    const serverOffset = serverBootTime - clientBootTime;
+
+    function actualizarRelojBot() {
+      const serverDate = new Date(Date.now() + serverOffset);
+      const opcionesFecha = { 
+        timeZone: 'America/Mexico_City', 
+        weekday: 'long', 
+        day: 'numeric', 
+        month: 'long' 
+      };
+      const opcionesHora = { 
+        timeZone: 'America/Mexico_City', 
+        hour: '2-digit', 
+        minute: '2-digit', 
+        second: '2-digit', 
+        hour12: true 
+      };
+      
+      const fechaStr = serverDate.toLocaleDateString('es-MX', opcionesFecha);
+      const horaStr = serverDate.toLocaleTimeString('es-MX', opcionesHora);
+      
+      const elFecha = document.getElementById('reloj-fecha-bot');
+      const elHora = document.getElementById('reloj-hora-bot');
+      
+      if (elFecha) elFecha.textContent = fechaStr.charAt(0).toUpperCase() + fechaStr.slice(1);
+      if (elHora) elHora.textContent = horaStr;
+    }
+
+    actualizarRelojBot();
+    setInterval(actualizarRelojBot, 1000);
   </script>
 </body>
 </html>
