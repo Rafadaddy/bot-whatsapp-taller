@@ -604,7 +604,7 @@ async function iniciarWhatsApp() {
 
   socketWhatsApp = makeWASocket({
     auth: state,
-    browser: Browsers.macOS('Desktop'),
+    browser: Browsers.ubuntu('Chrome'),
     logger: pino({ level: 'warn' }),
     printQRInTerminal: false,
     connectTimeoutMs: 30000,
