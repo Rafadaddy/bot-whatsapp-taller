@@ -558,7 +558,23 @@ async function actualizarGrupos() {
     for (const [id, meta] of Object.entries(grupos)) {
       groupMetadataCache.set(id, meta);
     }
-    console.log(`📋 ¡${gruposDetectados.length} grupos detectados y guardados en memoria con éxito!`);
+    
+    // Garantizar que los grupos configurados tengan participantes completos para cifrado
+    config = leerConfig();
+    const gruposClave = [config.grupoIngresosId, config.grupoListasId].filter(Boolean);
+    for (const gId of gruposClave) {
+      try {
+        const fullMeta = await socketWhatsApp.groupMetadata(gId);
+        if (fullMeta && Array.isArray(fullMeta.participants)) {
+          groupMetadataCache.set(gId, fullMeta);
+          console.log(`✅ [METADATA] ${fullMeta.subject || gId} sincronizado con ${fullMeta.participants.length} participantes.`);
+        }
+      } catch (errG) {
+        console.warn(`Aviso al cargar metadata de ${gId}:`, errG.message);
+      }
+    }
+
+    console.log(`📋 ¡${gruposDetectados.length} grupos detectados y sincronizados con éxito!`);
   } catch (e) {
     console.warn('Reintentando sincronizar grupos...', e.message);
   }
@@ -573,19 +589,29 @@ async function iniciarWhatsApp() {
   estadoConexion = 'iniciando';
   console.log('⏳ Iniciando WhatsApp Baileys...');
   
+  // Limpiar socket anterior si existía para evitar conexiones zombi
+  if (socketWhatsApp) {
+    try {
+      socketWhatsApp.ev.removeAllListeners();
+      socketWhatsApp.ws?.close();
+      socketWhatsApp.end();
+    } catch (e) {}
+    socketWhatsApp = null;
+  }
+
   await restaurarSesionDesdeFirebase();
   const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
 
   socketWhatsApp = makeWASocket({
     auth: state,
-    browser: Browsers.ubuntu('Chrome'),
+    browser: Browsers.macOS('Desktop'),
     logger: pino({ level: 'warn' }),
     printQRInTerminal: false,
     connectTimeoutMs: 30000,
     defaultQueryTimeoutMs: 30000,
-    keepAliveIntervalMs: 30000,
+    keepAliveIntervalMs: 25000,
     syncFullHistory: false,
-    markOnlineOnConnect: false,
+    markOnlineOnConnect: true,
     cachedGroupMetadata: async (jid) => groupMetadataCache.get(jid),
     getMessage: async (key) => {
       if (key && key.id && mensajeStore.has(key.id)) {
@@ -675,6 +701,20 @@ async function enviarMensajeGrupo(grupoId, texto) {
     console.warn(`[!] Falta configurar el ID del grupo en la página de control.`);
     registrarActividad('error', `Sin grupo asignado: ${texto}`, false);
     return false;
+  }
+
+  // Asegurar metadata y participantes del grupo antes de cifrar y enviar
+  if (grupoId.endsWith('@g.us') && socketWhatsApp) {
+    const meta = groupMetadataCache.get(grupoId);
+    if (!meta || !Array.isArray(meta.participants) || meta.participants.length === 0) {
+      try {
+        console.log(`🔍 Cargando participantes de grupo ${grupoId} antes de enviar...`);
+        const freshMeta = await socketWhatsApp.groupMetadata(grupoId);
+        if (freshMeta) groupMetadataCache.set(grupoId, freshMeta);
+      } catch (e) {
+        console.warn(`Aviso al cargar metadata de ${grupoId}:`, e.message);
+      }
+    }
   }
 
   try {
@@ -1497,11 +1537,15 @@ server.get('/probar-entrega', async (req, res) => {
 server.get('/group-info', async (req, res) => {
   config = leerConfig();
   try {
-    const meta = await socketWhatsApp.groupMetadata(config.grupoIngresosId);
+    const targetGroup = req.query.id || (req.query.tipo === 'listas' ? config.grupoListasId : config.grupoIngresosId);
+    const meta = await socketWhatsApp.groupMetadata(targetGroup);
     res.json({
       ok: true,
       id: meta.id,
       subject: meta.subject,
+      announce: meta.announce,
+      restrict: meta.restrict,
+      participantsCount: meta.participants?.length || 0,
       myUserId: socketWhatsApp?.user?.id,
       myLid: socketWhatsApp?.user?.lid,
       participants: meta.participants?.map(p => ({ id: p.id, admin: p.admin }))
