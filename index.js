@@ -152,8 +152,13 @@ async function generarTextoEstatusTaller() {
       return null;
     }
 
-    // Ordenar numéricamente por número de unidad
-    activeUnits.sort((a, b) => (a.unit_number || '').localeCompare(b.unit_number || '', undefined, { numeric: true }));
+    // Ordenar cronológicamente descendente: la última que ingresó al taller queda hasta arriba
+    activeUnits.sort((a, b) => {
+      const timeA = new Date(a.created_date || a.entry_date || 0).getTime();
+      const timeB = new Date(b.created_date || b.entry_date || 0).getTime();
+      if (timeB !== timeA) return timeB - timeA;
+      return (b.unit_number || '').localeCompare(a.unit_number || '', undefined, { numeric: true });
+    });
 
     const now = new Date();
     const fechaStr = now.toLocaleDateString('es-ES', { 
