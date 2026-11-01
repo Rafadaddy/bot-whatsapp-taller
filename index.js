@@ -263,13 +263,13 @@ setInterval(async () => {
 }, 30000);
 
 function esperarConexion(timeoutMs = 15000) {
-  if (socketWhatsApp && estadoConexion === 'conectado') {
+  if (socketWhatsApp && estadoConexion === 'conectado' && socketWhatsApp.ws?.readyState === 1) {
     return Promise.resolve(true);
   }
   return new Promise((resolve) => {
     const startTime = Date.now();
     const interval = setInterval(() => {
-      if (socketWhatsApp && estadoConexion === 'conectado') {
+      if (socketWhatsApp && estadoConexion === 'conectado' && socketWhatsApp.ws?.readyState === 1) {
         clearInterval(interval);
         resolve(true);
       } else if (Date.now() - startTime > timeoutMs) {
@@ -692,8 +692,11 @@ async function enviarMensajeGrupo(grupoId, texto) {
   }
 
   // Si WhatsApp se está reconectando en ese instante, esperar hasta 15 segundos
-  if (!socketWhatsApp || estadoConexion !== 'conectado') {
-    console.log(`⏳ WhatsApp reconectando (${estadoConexion}). Esperando hasta 15s para enviar: "${texto}"...`);
+  if (!socketWhatsApp || estadoConexion !== 'conectado' || socketWhatsApp.ws?.readyState !== 1) {
+    console.log(`⏳ WhatsApp reconectando (${estadoConexion}, ws: ${socketWhatsApp?.ws?.readyState}). Esperando hasta 15s para enviar: "${texto}"...`);
+    if (estadoConexion === 'conectado' && socketWhatsApp && socketWhatsApp.ws?.readyState !== 1) {
+      iniciarWhatsApp();
+    }
     const listo = await esperarConexion(15000);
     if (!listo) {
       console.warn(`[!] No se pudo enviar mensaje porque WhatsApp no reconectó a tiempo.`);
@@ -1692,6 +1695,11 @@ server.post('/enviar-directo', async (req, res) => {
 });
 
 server.all(['/health', '/Health'], async (req, res) => {
+  res.set('Access-Control-Allow-Origin', '*');
+  res.set('Access-Control-Allow-Methods', 'GET, HEAD, OPTIONS');
+  res.set('Access-Control-Allow-Headers', '*');
+  if (req.method === 'OPTIONS') return res.status(204).end();
+
   // Solo registrar si viene de una acción expresa en la App del Taller para no saturar el historial
   if (req.query.from === 'app_taller_action') {
     registrarActividad('app', '⚡ Despertador App Taller activado', true);
