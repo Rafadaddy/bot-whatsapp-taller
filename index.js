@@ -47,7 +47,7 @@ let listenerIniciado = false;
 const estadosConocidos = new Map();
 let notifiedSet = new Set();
 let historialActividad = [];
-const MAX_HISTORIAL = 20;
+const MAX_HISTORIAL = 100;
 let ultimaUnidadIngreso = { numero: '', mensaje: '' };
 let ultimaUnidadLista = { numero: '', mensaje: '' };
 let ultimaFechaReporteEstatus = '';
@@ -852,15 +852,41 @@ function iniciarListenerFirebase() {
       esCargaInicial = false;
       console.log(`⚡ Sincronización inicial: ${estadosConocidos.size} unidades activas en memoria.`);
 
-      // REGLA DE ORO DEL USUARIO: "Lo que ya pasó, pasó. No mandar cosas atrasadas".
-      // Marcar ABSOLUTAMENTE TODAS las unidades ya existentes como notificadas.
-      // Cero recuperación de backlog de horas anteriores ni duplicaciones.
+      // REGLA DEL USUARIO: "No mandar cosas atrasadas, máximo 2 minutos si el bot estaba arrancando".
+      const ahoraMs = Date.now();
+      const LIMITE_RECIENTE_MS = 2 * 60 * 1000; // Máximo 2 minutos exactos
+      const pendientesDeArranque = [];
+
       for (const docSnap of snapshot.docs) {
         const docId = docSnap.id;
         const unit = docSnap.data();
-        notifiedSet.add(docId + '_ingreso');
+        const fechaCreacion = new Date(unit.created_date || 0).getTime();
+        const esMuyReciente = fechaCreacion > 0 && ((ahoraMs - fechaCreacion) <= LIMITE_RECIENTE_MS);
+
+        if (notifiedSet.has(docId + '_ingreso')) {
+          // Ya fue notificado en el pasado
+        } else if (esMuyReciente && !['entregada', 'lista', 'paro_tecnico', 'tramite_legal'].includes(unit.status)) {
+          // Entró hace menos de 2 minutos mientras el bot despertaba
+          pendientesDeArranque.push({ tipo: 'ingreso', docId, unit });
+        } else {
+          // Más de 2 minutos: marcar como notificado para evitar retrasos y duplicados manuales
+          notifiedSet.add(docId + '_ingreso');
+        }
+
         if (unit.status === 'lista') {
-          notifiedSet.add(docId + '_lista');
+          let fechaLista = 0;
+          if (Array.isArray(unit.timeline)) {
+            const tLista = [...unit.timeline].reverse().find(t => t.status === 'lista');
+            if (tLista?.date) fechaLista = new Date(tLista.date).getTime();
+          }
+          const listaMuyReciente = fechaLista > 0 && ((ahoraMs - fechaLista) <= LIMITE_RECIENTE_MS);
+          if (notifiedSet.has(docId + '_lista')) {
+            // Ya notificado
+          } else if (listaMuyReciente) {
+            pendientesDeArranque.push({ tipo: 'lista', docId, unit });
+          } else {
+            notifiedSet.add(docId + '_lista');
+          }
         }
       }
 
@@ -869,6 +895,17 @@ function iniciarListenerFirebase() {
         items,
         updated_at: new Date().toISOString()
       }).catch(() => {});
+
+      // Despachar inmediatamente cualquier unidad de los últimos 2 minutos
+      for (const p of pendientesDeArranque) {
+        if (p.tipo === 'ingreso') {
+          console.log(`⚡ [ARRANQUE <2 min] Despachando ingreso reciente #${p.unit.unit_number}...`);
+          await notificarIngresoSiAplica(p.docId, p.unit);
+        } else if (p.tipo === 'lista') {
+          console.log(`⚡ [ARRANQUE <2 min] Despachando lista reciente #${p.unit.unit_number}...`);
+          await notificarListaSiAplica(p.docId, p.unit);
+        }
+      }
       return;
     }
 
@@ -934,6 +971,12 @@ function iniciarListenerFirebase() {
   }, (error) => {
     console.error('Error en listener de Firebase:', error.message);
     registrarActividad('error', `Listener DB: ${error.message}`, false);
+    listenerIniciado = false;
+    setTimeout(() => {
+      console.log('🔄 Reintentando conectar listener de Firebase en 5s...');
+      iniciarListenerFirebase();
+      listenerIniciado = true;
+    }, 5000);
   });
 }
 
@@ -1649,13 +1692,10 @@ server.post('/enviar-directo', async (req, res) => {
 });
 
 server.all(['/health', '/Health'], async (req, res) => {
-  const ua = (req.headers['user-agent'] || '').toLowerCase();
-  let origen = 'Despertador externo';
-  if (req.query.from === 'browser') origen = 'Navegador Web';
-  else if (ua.includes('uptimerobot')) origen = 'UptimeRobot';
-  else if (ua.includes('cron-job')) origen = 'cron-job.org';
-
-  registrarActividad('pulso', `Pulso (${origen})`, true);
+  // Solo registrar si viene de una acción expresa en la App del Taller para no saturar el historial
+  if (req.query.from === 'app_taller_action') {
+    registrarActividad('app', '⚡ Despertador App Taller activado', true);
+  }
   res.status(200).type('text/plain').send('OK');
 });
 
