@@ -1735,3 +1735,27 @@ server.listen(PORT, async () => {
   }
   await iniciarWhatsApp();
 });
+
+// Manejo de apagado ordenado para evitar falsas alertas de Render al actualizar
+process.on('SIGTERM', () => {
+  console.log('🛑 [SIGTERM] Render deteniendo contenedor para actualización. Cierre limpio...');
+  if (socketWhatsApp) {
+    try { socketWhatsApp.end(); } catch (e) {}
+  }
+  process.exit(0);
+});
+
+process.on('SIGINT', () => {
+  if (socketWhatsApp) {
+    try { socketWhatsApp.end(); } catch (e) {}
+  }
+  process.exit(0);
+});
+
+process.on('uncaughtException', (err) => {
+  console.error('⚠️ [Excepción protegida]:', err.message);
+});
+
+process.on('unhandledRejection', (reason) => {
+  console.error('⚠️ [Rechazo protegido]:', reason);
+});
