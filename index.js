@@ -247,12 +247,13 @@ async function checarEnvioReporteDiario() {
   const horaInicioStr = esFinDeSemana ? (horarioConfig.finSemanaInicio || '09:00') : (horarioConfig.semanaInicio || '09:00');
   const [hIni, mIni] = horaInicioStr.split(':').map(Number);
 
-  // Se activa a la hora de inicio de turno (ventana de 6 min) si no se ha enviado hoy
-  if (hora === hIni && minuto >= mIni && minuto < mIni + 6) {
-    if (ultimaFechaReporteEstatus !== hoyStr && estadoConexion === 'conectado') {
-      console.log(`⏰ [${horaInicioStr}] Enviando reporte diario automático de estatus a Mecánicos...`);
-      await enviarReporteEstatusTaller(false);
-    }
+  const minutosActuales = hora * 60 + minuto;
+  const minutosInicio = hIni * 60 + mIni;
+
+  // Se activa automáticamente al iniciar el turno (o al conectar en la mañana) si no se ha enviado hoy
+  if (minutosActuales >= minutosInicio && ultimaFechaReporteEstatus !== hoyStr && estadoConexion === 'conectado') {
+    console.log(`⏰ [${horaInicioStr}] Enviando reporte diario automático de estatus a Mecánicos...`);
+    await enviarReporteEstatusTaller(false);
   }
 }
 
@@ -263,13 +264,13 @@ setInterval(async () => {
 }, 30000);
 
 function esperarConexion(timeoutMs = 15000) {
-  if (socketWhatsApp && estadoConexion === 'conectado' && socketWhatsApp.ws?.readyState === 1) {
+  if (socketWhatsApp && estadoConexion === 'conectado') {
     return Promise.resolve(true);
   }
   return new Promise((resolve) => {
     const startTime = Date.now();
     const interval = setInterval(() => {
-      if (socketWhatsApp && estadoConexion === 'conectado' && socketWhatsApp.ws?.readyState === 1) {
+      if (socketWhatsApp && estadoConexion === 'conectado') {
         clearInterval(interval);
         resolve(true);
       } else if (Date.now() - startTime > timeoutMs) {
@@ -598,8 +599,7 @@ async function iniciarWhatsApp() {
   if (socketWhatsApp) {
     try {
       socketWhatsApp.ev.removeAllListeners();
-      socketWhatsApp.ws?.close();
-      socketWhatsApp.end();
+      socketWhatsApp.end?.();
     } catch (e) {}
     socketWhatsApp = null;
   }
@@ -692,11 +692,8 @@ async function enviarMensajeGrupo(grupoId, texto) {
   }
 
   // Si WhatsApp se está reconectando en ese instante, esperar hasta 15 segundos
-  if (!socketWhatsApp || estadoConexion !== 'conectado' || socketWhatsApp.ws?.readyState !== 1) {
-    console.log(`⏳ WhatsApp reconectando (${estadoConexion}, ws: ${socketWhatsApp?.ws?.readyState}). Esperando hasta 15s para enviar: "${texto}"...`);
-    if (estadoConexion === 'conectado' && socketWhatsApp && socketWhatsApp.ws?.readyState !== 1) {
-      iniciarWhatsApp();
-    }
+  if (!socketWhatsApp || estadoConexion !== 'conectado') {
+    console.log(`⏳ WhatsApp reconectando (${estadoConexion}). Esperando hasta 15s para enviar: "${texto}"...`);
     const listo = await esperarConexion(15000);
     if (!listo) {
       console.warn(`[!] No se pudo enviar mensaje porque WhatsApp no reconectó a tiempo.`);
@@ -1521,7 +1518,6 @@ server.get('/debug', (req, res) => {
     horarioConfig,
     horaMexico: obtenerFechaHoraMexico(),
     hasSocket: !!socketWhatsApp,
-    wsReadyState: socketWhatsApp?.ws?.readyState, // 0: CONNECTING, 1: OPEN, 2: CLOSING, 3: CLOSED
     user: socketWhatsApp?.user || null,
     gruposCount: gruposDetectados.length,
     listenerIniciado,
