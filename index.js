@@ -9,6 +9,31 @@ import { fileURLToPath } from 'url';
 import { createRequire } from 'module';
 import express from 'express';
 
+// Captura de logs en memoria para diagnóstico remoto vía /logs
+const systemLogs = [];
+function agregarLog(level, msg) {
+  const time = new Date().toLocaleTimeString('es-MX', { timeZone: 'America/Mexico_City' });
+  systemLogs.push({ time, level, msg });
+  if (systemLogs.length > 250) systemLogs.shift();
+}
+
+const origLog = console.log;
+const origWarn = console.warn;
+const origError = console.error;
+
+console.log = (...args) => {
+  origLog(...args);
+  agregarLog('info', args.map(a => typeof a === 'object' ? JSON.stringify(a) : String(a)).join(' '));
+};
+console.warn = (...args) => {
+  origWarn(...args);
+  agregarLog('warn', args.map(a => typeof a === 'object' ? JSON.stringify(a) : String(a)).join(' '));
+};
+console.error = (...args) => {
+  origError(...args);
+  agregarLog('error', args.map(a => typeof a === 'object' ? JSON.stringify(a) : String(a)).join(' '));
+};
+
 const require = createRequire(import.meta.url);
 const { initializeApp } = require('firebase/app');
 const { getAuth, signInWithEmailAndPassword } = require('firebase/auth');
@@ -561,13 +586,10 @@ async function actualizarGrupos() {
       id: g.id,
       name: g.subject
     }));
-    for (const [id, meta] of Object.entries(grupos)) {
-      groupMetadataCache.set(id, meta);
-    }
     
-    // Garantizar que los grupos configurados tengan participantes completos para cifrado
+    // Garantizar que los grupos configurados y el grupo de prueba tengan participantes completos para cifrado
     config = leerConfig();
-    const gruposClave = [config.grupoIngresosId, config.grupoListasId].filter(Boolean);
+    const gruposClave = [config.grupoIngresosId, config.grupoListasId, '120363431907400300@g.us'].filter(Boolean);
     for (const gId of gruposClave) {
       try {
         const fullMeta = await socketWhatsApp.groupMetadata(gId);
@@ -617,12 +639,21 @@ async function iniciarWhatsApp() {
     keepAliveIntervalMs: 25000,
     syncFullHistory: false,
     markOnlineOnConnect: true,
-    cachedGroupMetadata: async (jid) => groupMetadataCache.get(jid),
+    cachedGroupMetadata: async (jid) => {
+      let meta = groupMetadataCache.get(jid);
+      if (!meta || !Array.isArray(meta.participants) || meta.participants.length === 0) {
+        try {
+          meta = await socketWhatsApp?.groupMetadata(jid);
+          if (meta) groupMetadataCache.set(jid, meta);
+        } catch (e) {}
+      }
+      return meta;
+    },
     getMessage: async (key) => {
       if (key && key.id && mensajeStore.has(key.id)) {
         return mensajeStore.get(key.id);
       }
-      return undefined;
+      return { conversation: '' };
     }
   });
 
@@ -1263,13 +1294,19 @@ server.get('/', (req, res) => {
     ${estadoConexion === 'conectado' ? `
       <div class="card">
         <h2><span>🧪 Pruebas de Diagnóstico</span></h2>
-        <div style="display: flex; gap: 8px;">
-          <form action="/probar-ingresos" method="POST" style="flex: 1; margin: 0;">
-            <button type="submit" class="btn btn-save" style="font-size: 11px; padding: 10px 2px; margin: 0; background: #2563eb;">🧪 Probar Mecánicos</button>
+        <p style="font-size: 11px; color: #94a3b8; margin: 0 0 8px 0;">Para verificar la entrega sin afectar la operación laboral, usa el botón del Grupo Prueba:</p>
+        <div style="display: flex; flex-direction: column; gap: 8px;">
+          <form action="/probar-prueba-post" method="POST" style="margin: 0;">
+            <button type="submit" class="btn btn-save" style="font-size: 12px; padding: 11px 4px; margin: 0; background: #6366f1;">🧪 Probar Grupo Prueba (Seguro - No afecta trabajo)</button>
           </form>
-          <form action="/probar-listas" method="POST" style="flex: 1; margin: 0;">
-            <button type="submit" class="btn btn-save" style="font-size: 11px; padding: 10px 2px; margin: 0; background: #059669;">🧪 Probar Listas</button>
-          </form>
+          <div style="display: flex; gap: 8px;">
+            <form action="/probar-ingresos" method="POST" style="flex: 1; margin: 0;">
+              <button type="submit" class="btn btn-save" style="font-size: 11px; padding: 10px 2px; margin: 0; background: #2563eb;">🧪 Probar Mecánicos</button>
+            </form>
+            <form action="/probar-listas" method="POST" style="flex: 1; margin: 0;">
+              <button type="submit" class="btn btn-save" style="font-size: 11px; padding: 10px 2px; margin: 0; background: #059669;">🧪 Probar Listas</button>
+            </form>
+          </div>
         </div>
       </div>
 
@@ -1279,6 +1316,7 @@ server.get('/', (req, res) => {
           <div class="form-group">
             <label>Destino:</label>
             <select name="destino">
+              <option value="prueba">Grupo Prueba (120363431907400300@g.us) [Seguro]</option>
               <option value="ingresos">Mecánicos Teziutlan (Ingresos)</option>
               <option value="listas">Unidades Listas ✅</option>
             </select>
@@ -1547,15 +1585,83 @@ server.get('/debug', (req, res) => {
   });
 });
 
+server.get('/logs', (req, res) => {
+  res.type('text/plain; charset=utf-8').send(
+    systemLogs.length === 0 
+      ? 'Sin logs recientes todavía.' 
+      : systemLogs.map(l => `[${l.time}] [${l.level.toUpperCase()}] ${l.msg}`).join('\n')
+  );
+});
+
 server.get('/reset-reporte', (req, res) => {
   ultimaFechaReporteEstatus = '';
   res.json({ ok: true, msg: 'Reporte matutino reseteado. Listo para enviarse a la hora programada.' });
 });
 
+// Endpoint seguro para pruebas: solo prueba contra el grupo de prueba
+server.get('/probar-prueba', async (req, res) => {
+  const grupoPrueba = '120363431907400300@g.us';
+  const texto = req.query.texto || `🧪 Diagnóstico Grupo Prueba [${new Date().toLocaleTimeString('es-MX', { timeZone: 'America/Mexico_City', hour12: true })}]`;
+  try {
+    if (!socketWhatsApp || estadoConexion !== 'conectado') {
+      return res.json({ ok: false, error: `WhatsApp no conectado (Estado: ${estadoConexion})` });
+    }
+    console.log(`🧪 [TEST PRUEBA] Enviando mensaje de prueba a ${grupoPrueba}...`);
+    try {
+      const meta = await socketWhatsApp.groupMetadata(grupoPrueba);
+      groupMetadataCache.set(grupoPrueba, meta);
+      console.log(`🧪 [TEST PRUEBA] Metadata obtenida: "${meta.subject}", participantes: ${meta.participants?.length}`);
+    } catch (errM) {
+      console.warn(`🧪 [TEST PRUEBA] Aviso al obtener metadata: ${errM.message}`);
+    }
+    
+    let ackRecibido = false;
+    let statusRecibido = 1;
+    const inicio = Date.now();
+    const r = await socketWhatsApp.sendMessage(grupoPrueba, { text: texto });
+    const msgId = r?.key?.id;
+    console.log(`🧪 [TEST PRUEBA] sendMessage devolvió msgId: ${msgId}, status: ${r?.status}`);
+
+    await new Promise((resolve) => {
+      const listener = (updates) => {
+        for (const u of updates) {
+          if (u.key?.id === msgId) {
+            statusRecibido = u.update?.status;
+            console.log(`🧪 [TEST PRUEBA] Update para ${msgId}: status ${statusRecibido}`);
+            if (statusRecibido >= 2) {
+              ackRecibido = true;
+              try { socketWhatsApp.ev.off('messages.update', listener); } catch (e) {}
+              resolve();
+              return;
+            }
+          }
+        }
+      };
+      socketWhatsApp.ev.on('messages.update', listener);
+      setTimeout(() => {
+        try { socketWhatsApp.ev.off('messages.update', listener); } catch (e) {}
+        resolve();
+      }, 10000);
+    });
+
+    res.json({
+      ok: true,
+      destino: grupoPrueba,
+      msgId,
+      ackRecibido,
+      statusFinal: statusRecibido,
+      duracionMs: Date.now() - inicio
+    });
+  } catch (err) {
+    console.error(`🧪 [TEST PRUEBA] Error al enviar:`, err);
+    res.json({ ok: false, error: err.message, stack: err.stack });
+  }
+});
+
 server.get('/probar-entrega', async (req, res) => {
   config = leerConfig();
-  const grupo = req.query.grupo === 'listas' ? config.grupoListasId : config.grupoIngresosId;
-  const texto = `🧪 Diagnóstico de entrega [${new Date().toLocaleTimeString('es-MX', { timeZone: 'America/Mexico_City', hour12: true })}]`;
+  const grupo = req.query.id || (req.query.grupo === 'listas' ? config.grupoListasId : (req.query.grupo === 'prueba' ? '120363431907400300@g.us' : config.grupoIngresosId));
+  const texto = req.query.texto || `🧪 Diagnóstico de entrega [${new Date().toLocaleTimeString('es-MX', { timeZone: 'America/Mexico_City', hour12: true })}]`;
 
   try {
     let ackRecibido = false;
@@ -1698,12 +1804,22 @@ server.post('/enviar-estatus-diario', async (req, res) => {
   res.redirect('/');
 });
 
+server.post('/probar-prueba-post', async (req, res) => {
+  const grupoPrueba = '120363431907400300@g.us';
+  const texto = `🧪 Prueba de conexión [${new Date().toLocaleTimeString('es-MX', { timeZone: 'America/Mexico_City', hour12: true })}]`;
+  console.log(`🧪 Enviando prueba segura a grupo Prueba (${grupoPrueba})...`);
+  await enviarMensajeGrupo(grupoPrueba, texto);
+  res.redirect('/');
+});
+
 server.post('/enviar-directo', async (req, res) => {
   config = leerConfig();
   const { destino, texto } = req.body;
   if (texto && texto.trim()) {
-    const targetGroup = destino === 'ingresos' ? config.grupoIngresosId : config.grupoListasId;
-    console.log(`💬 Enviando mensaje directo manual: "${texto.trim()}"`);
+    let targetGroup = config.grupoListasId;
+    if (destino === 'prueba') targetGroup = '120363431907400300@g.us';
+    else if (destino === 'ingresos') targetGroup = config.grupoIngresosId;
+    console.log(`💬 Enviando mensaje directo manual a ${targetGroup}: "${texto.trim()}"`);
     await enviarMensajeGrupo(targetGroup, texto.trim());
   }
   res.redirect('/');
