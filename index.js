@@ -741,61 +741,23 @@ async function ejecutarEnvioReal(grupoId, texto) {
     }
   }
 
-  // Enviar con verificación de confirmación del servidor de WhatsApp (SERVER_ACK)
-  const MAX_INTENTOS = 2;
-  for (let intento = 1; intento <= MAX_INTENTOS; intento++) {
-    try {
-      const res = await socketWhatsApp.sendMessage(grupoId, { text: texto });
-      const msgId = res?.key?.id;
-
-      if (msgId) {
-        mensajeStore.set(msgId, res.message);
-        if (mensajeStore.size > 200) {
-          const firstKey = mensajeStore.keys().next().value;
-          mensajeStore.delete(firstKey);
-        }
-
-        // Esperar hasta 4.5s a que el servidor de WhatsApp confirme recepción real (status >= 2)
-        const confirmado = await new Promise((resolve) => {
-          const listener = (updates) => {
-            for (const u of updates) {
-              if (u.key?.id === msgId && u.update?.status >= 2) {
-                try { socketWhatsApp.ev.off('messages.update', listener); } catch (e) {}
-                resolve(true);
-                return;
-              }
-            }
-          };
-          socketWhatsApp.ev.on('messages.update', listener);
-          setTimeout(() => {
-            try { socketWhatsApp.ev.off('messages.update', listener); } catch (e) {}
-            resolve(false);
-          }, 4500);
-        });
-
-        if (confirmado) {
-          console.log(`📨 [CONFIRMADO POR WHATSAPP] Enviado a ${grupoId}: "${texto}"`);
-          registrarActividad('envio', texto, true);
-          return true;
-        } else {
-          console.warn(`⚠️ [SIN CONFIRMACIÓN] WhatsApp no confirmó mensaje "${texto}". Socket posiblemente inactivo tras pausa. Reintentando (${intento}/${MAX_INTENTOS})...`);
-          if (intento < MAX_INTENTOS) {
-            iniciarWhatsApp();
-            await esperarConexion(12000);
-          }
-        }
-      }
-    } catch (error) {
-      console.error(`❌ Error al enviar mensaje (Intento ${intento}):`, error.message);
-      if (intento < MAX_INTENTOS) {
-        iniciarWhatsApp();
-        await esperarConexion(12000);
+  try {
+    const res = await socketWhatsApp.sendMessage(grupoId, { text: texto });
+    if (res && res.key && res.key.id) {
+      mensajeStore.set(res.key.id, res.message);
+      if (mensajeStore.size > 200) {
+        const firstKey = mensajeStore.keys().next().value;
+        mensajeStore.delete(firstKey);
       }
     }
+    console.log(`📨 [${new Date().toLocaleTimeString('es-MX', { timeZone: 'America/Mexico_City' })}] Enviado a ${grupoId}: "${texto}"`);
+    registrarActividad('envio', texto, true);
+    return true;
+  } catch (error) {
+    console.error(`❌ Error al enviar mensaje:`, error.message);
+    registrarActividad('error', `Error al enviar: ${error.message}`, false);
+    return false;
   }
-
-  registrarActividad('error', `Fallo de entrega (sin confirmación): ${texto}`, false);
-  return false;
 }
 
 function construirMensajeIngreso(unit, numUnidad) {
