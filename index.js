@@ -683,8 +683,27 @@ async function iniciarWhatsApp() {
   });
 }
 
-// Enviar mensajes a WhatsApp
+// Cola de serialización: impide que mensajes cruzados o concurrentes colisionen en el socket de WhatsApp
+let colaEnvioSerial = Promise.resolve();
+
 async function enviarMensajeGrupo(grupoId, texto) {
+  return new Promise((resolve) => {
+    colaEnvioSerial = colaEnvioSerial.then(async () => {
+      try {
+        const resultado = await ejecutarEnvioReal(grupoId, texto);
+        // Pausa de 1.5s entre mensajes para que el cifrado y la red no choquen
+        await new Promise(r => setTimeout(r, 1500));
+        resolve(resultado);
+      } catch (err) {
+        console.error('Error en cola serial:', err.message);
+        resolve(false);
+      }
+    });
+  });
+}
+
+// Enviar mensajes a WhatsApp de forma controlada y protegida
+async function ejecutarEnvioReal(grupoId, texto) {
   if (!botActivo || (modoHorarioAutomatico && !estaEnHorarioLaboral())) {
     console.log(`⏸️ [PAUSADO/FUERA DE HORARIO] Mensaje no enviado: "${texto}"`);
     registrarActividad('pausa', `Fuera de turno: ${texto}`, false);
