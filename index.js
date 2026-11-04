@@ -587,26 +587,50 @@ async function restaurarSesionDesdeFirebase() {
   return false;
 }
 
+let debounceRespaldoTimeout = null;
+function programarRespaldoSesion(retrasoMs = 20000) {
+  if (debounceRespaldoTimeout) clearTimeout(debounceRespaldoTimeout);
+  debounceRespaldoTimeout = setTimeout(async () => {
+    debounceRespaldoTimeout = null;
+    await respaldarSesionAFirebase();
+  }, retrasoMs);
+}
+
 async function respaldarSesionAFirebase() {
   try {
     if (!fs.existsSync(AUTH_DIR)) return;
     const fileList = fs.readdirSync(AUTH_DIR);
     const files = {};
-    for (const f of fileList) {
+    let totalBytes = 0;
+
+    // Priorizar creds.json y archivos críticos
+    const sortedFiles = fileList.sort((a, b) => {
+      if (a === 'creds.json') return -1;
+      if (b === 'creds.json') return 1;
+      return 0;
+    });
+
+    for (const f of sortedFiles) {
       const fullPath = path.join(AUTH_DIR, f);
       if (fs.statSync(fullPath).isFile()) {
-        files[f] = fs.readFileSync(fullPath).toString('base64');
+        const contentBase64 = fs.readFileSync(fullPath).toString('base64');
+        // Firestore tiene límite de 1MB por documento; limitar a ~850KB para seguridad
+        if (totalBytes + contentBase64.length < 850000) {
+          files[f] = contentBase64;
+          totalBytes += contentBase64.length;
+        }
       }
     }
+
     if (Object.keys(files).length > 0) {
       await setDoc(doc(firestore, '_system', 'whatsapp_session'), {
         files,
         updated_at: new Date().toISOString()
       });
-      console.log(`💾 Sesión respaldada en Firebase (${Object.keys(files).length} archivos).`);
+      console.log(`💾 Sesión respaldada en Firebase (${Object.keys(files).length} archivos, ${Math.round(totalBytes / 1024)} KB).`);
     }
   } catch (e) {
-    console.warn('Error al respaldar sesión en Firebase:', e.message);
+    console.warn('Aviso al respaldar sesión en Firebase:', e.message);
   }
 }
 
@@ -705,7 +729,7 @@ async function iniciarWhatsApp() {
 
   socketWhatsApp.ev.on('creds.update', async () => {
     await saveCreds();
-    await respaldarSesionAFirebase();
+    programarRespaldoSesion(20000); // Debounce de 20s para proteger cuota de Firestore
   });
 
   socketWhatsApp.ev.on('connection.update', async (update) => {
@@ -722,7 +746,7 @@ async function iniciarWhatsApp() {
       estadoConexion = 'conectado';
       ultimoQRDataURL = null;
       console.log('✅ ¡WHATSAPP CONECTADO EXITOSAMENTE!');
-      await respaldarSesionAFirebase();
+      programarRespaldoSesion(5000);
 
       // Esperar 5 segundos a que el handshake y la sincronización se estabilicen
       setTimeout(actualizarGrupos, 5000);
