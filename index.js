@@ -8,6 +8,7 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import { createRequire } from 'module';
 import express from 'express';
+import zlib from 'zlib';
 
 // Captura de logs en memoria para diagnóstico remoto vía /logs
 const systemLogs = [];
@@ -572,9 +573,25 @@ async function restaurarSesionDesdeFirebase() {
     const snap = await getDoc(doc(firestore, '_system', 'whatsapp_session'));
     if (snap.exists()) {
       const data = snap.data();
-      if (data && data.files && Object.keys(data.files).length > 0) {
-        console.log(`🔄 Restaurando sesión de WhatsApp guardada en la nube (${Object.keys(data.files).length} archivos)...`);
-        for (const [filename, base64Content] of Object.entries(data.files)) {
+      let files = null;
+
+      // 1. Descomprimir gzip si está disponible
+      if (data && data.gzip) {
+        try {
+          const decompressed = zlib.gunzipSync(Buffer.from(data.gzip, 'base64'));
+          files = JSON.parse(decompressed.toString('utf-8'));
+        } catch (errZ) {
+          console.warn('Aviso al descomprimir gzip de sesión:', errZ.message);
+        }
+      }
+      // 2. Retrocompatibilidad con formato sin comprimir
+      if (!files && data && data.files) {
+        files = data.files;
+      }
+
+      if (files && Object.keys(files).length > 0) {
+        console.log(`🔄 Restaurando sesión de WhatsApp guardada en la nube (${Object.keys(files).length} archivos)...`);
+        for (const [filename, base64Content] of Object.entries(files)) {
           fs.writeFileSync(path.join(AUTH_DIR, filename), Buffer.from(base64Content, 'base64'));
         }
         limpiarPrekeysAntiguas(AUTH_DIR, 40);
@@ -637,33 +654,24 @@ async function respaldarSesionAFirebase() {
     limpiarPrekeysAntiguas(AUTH_DIR, 40); // Purgar antes de guardar en la nube
     const fileList = fs.readdirSync(AUTH_DIR);
     const files = {};
-    let totalBytes = 0;
 
-    // Priorizar creds.json y archivos críticos
-    const sortedFiles = fileList.sort((a, b) => {
-      if (a === 'creds.json') return -1;
-      if (b === 'creds.json') return 1;
-      return 0;
-    });
-
-    for (const f of sortedFiles) {
+    for (const f of fileList) {
       const fullPath = path.join(AUTH_DIR, f);
       if (fs.statSync(fullPath).isFile()) {
-        const contentBase64 = fs.readFileSync(fullPath).toString('base64');
-        // Firestore tiene límite de 1MB por documento; limitar a ~850KB para seguridad
-        if (totalBytes + contentBase64.length < 850000) {
-          files[f] = contentBase64;
-          totalBytes += contentBase64.length;
-        }
+        files[f] = fs.readFileSync(fullPath).toString('base64');
       }
     }
 
     if (Object.keys(files).length > 0) {
+      const jsonString = JSON.stringify(files);
+      const compressedGzip = zlib.gzipSync(Buffer.from(jsonString, 'utf-8')).toString('base64');
       await setDoc(doc(firestore, '_system', 'whatsapp_session'), {
-        files,
+        gzip: compressedGzip,
+        filesCount: Object.keys(files).length,
+        sizeKb: Math.round(compressedGzip.length / 1024),
         updated_at: new Date().toISOString()
       });
-      console.log(`💾 Sesión respaldada en Firebase (${Object.keys(files).length} archivos, ${Math.round(totalBytes / 1024)} KB).`);
+      console.log(`💾 Sesión respaldada en Firebase (${Object.keys(files).length} archivos, comprimido gzip a ${Math.round(compressedGzip.length / 1024)} KB).`);
     }
   } catch (e) {
     console.warn('Aviso al respaldar sesión en Firebase:', e.message);
