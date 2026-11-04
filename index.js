@@ -577,6 +577,7 @@ async function restaurarSesionDesdeFirebase() {
         for (const [filename, base64Content] of Object.entries(data.files)) {
           fs.writeFileSync(path.join(AUTH_DIR, filename), Buffer.from(base64Content, 'base64'));
         }
+        limpiarPrekeysAntiguas(AUTH_DIR, 40);
         console.log('✅ ¡Sesión de WhatsApp restaurada con éxito!');
         return true;
       }
@@ -586,6 +587,40 @@ async function restaurarSesionDesdeFirebase() {
   }
   return false;
 }
+
+// Función para purgar pre-keys obsoletas y evitar que la sesión acumule cientos de archivos
+function limpiarPrekeysAntiguas(authFolder, maxPrekeys = 40) {
+  try {
+    if (!fs.existsSync(authFolder)) return;
+    const files = fs.readdirSync(authFolder);
+    const preKeys = [];
+
+    for (const file of files) {
+      const match = file.match(/^pre-key-(\d+)\.json$/);
+      if (match) {
+        preKeys.push({ file, id: parseInt(match[1], 10) });
+      }
+    }
+
+    if (preKeys.length > maxPrekeys) {
+      preKeys.sort((a, b) => a.id - b.id);
+      const aEliminar = preKeys.slice(0, preKeys.length - maxPrekeys);
+      for (const item of aEliminar) {
+        try {
+          fs.unlinkSync(path.join(authFolder, item.file));
+        } catch (e) {}
+      }
+      console.log(`🧹 [LIMPIEZA] Eliminadas ${aEliminar.length} pre-keys viejas. Conservadas las ${maxPrekeys} más recientes.`);
+    }
+  } catch (err) {
+    console.warn('Aviso en limpieza de prekeys:', err.message);
+  }
+}
+
+// Limpiar prekeys periódicamente cada 15 minutos en segundo plano
+setInterval(() => {
+  limpiarPrekeysAntiguas(AUTH_DIR, 40);
+}, 15 * 60 * 1000);
 
 let debounceRespaldoTimeout = null;
 function programarRespaldoSesion(retrasoMs = 20000) {
@@ -599,6 +634,7 @@ function programarRespaldoSesion(retrasoMs = 20000) {
 async function respaldarSesionAFirebase() {
   try {
     if (!fs.existsSync(AUTH_DIR)) return;
+    limpiarPrekeysAntiguas(AUTH_DIR, 40); // Purgar antes de guardar en la nube
     const fileList = fs.readdirSync(AUTH_DIR);
     const files = {};
     let totalBytes = 0;
@@ -762,8 +798,20 @@ async function iniciarWhatsApp() {
       const statusCode = lastDisconnect?.error?.output?.statusCode;
       console.log(`⚠️ Conexión de WhatsApp cerrada (Código: ${statusCode}). Reintentando reconexión automática en 3s...`);
       estadoConexion = 'iniciando';
-      // SEGURIDAD: NUNCA borrar la sesión de Firebase automáticamente por caídas de red o reinicios.
-      // La sesión solo se desvincula si el usuario presiona expresamente el botón 'Desvincular' en el panel.
+      // Si el código es 500 (Bad Session) o 503, purgar pre-keys y sender-keys obsoletas para forzar re-negociación limpia sin perder creds.json
+      if (statusCode === 500 || statusCode === 503) {
+        try {
+          if (fs.existsSync(AUTH_DIR)) {
+            const files = fs.readdirSync(AUTH_DIR);
+            for (const f of files) {
+              if (f.startsWith('pre-key-') || f.startsWith('sender-key-')) {
+                try { fs.unlinkSync(path.join(AUTH_DIR, f)); } catch (e) {}
+              }
+            }
+            console.log('🧹 [RECUPERACIÓN CÓDIGO 500] Llaves temporales limpiadas para re-sincronización limpia.');
+          }
+        } catch (e) {}
+      }
       setTimeout(iniciarWhatsApp, 3000);
     }
   });
