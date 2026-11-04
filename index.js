@@ -160,6 +160,52 @@ function actualizarEstadoHorario(notificarCambio = false) {
 // Inicializar el estado de horario al cargar el módulo
 actualizarEstadoHorario(false);
 
+// ==========================================
+// 1. VIGILANTE ANTI-CONGELAMIENTO (WATCHDOG RENDER)
+// Detecta si Render congeló/durmió el contenedor y se acaba de despertar
+// ==========================================
+let ultimoTickVigilante = Date.now();
+setInterval(() => {
+  const ahora = Date.now();
+  const diferencia = ahora - ultimoTickVigilante;
+  ultimoTickVigilante = ahora;
+
+  // Si entre dos ticks de 10s pasaron más de 45 segundos, Render congeló y reanudó el contenedor
+  if (diferencia > 45000) {
+    const segDormido = Math.round(diferencia / 1000);
+    console.warn(`⚠️ [WATCHDOG] El servidor de Render se acaba de despertar tras ${segDormido}s en reposo.`);
+    registrarActividad('app', `⚡ Despertar de reposo (${segDormido}s)`, true);
+
+    // Si WhatsApp estaba marcado como conectado, el socket TCP seguramente murió en el servidor de WhatsApp.
+    // Lo refrescamos de inmediato para que esté 100% fresco antes de recibir mensajes de unidades.
+    if (socketWhatsApp && estadoConexion === 'conectado') {
+      console.log('🔄 [WATCHDOG] Refrescando conexión de WhatsApp tras despertar de reposo...');
+      iniciarWhatsApp();
+    }
+  }
+}, 10000);
+
+// ==========================================
+// 2. DESPERTADOR ACTIVO (KEEP-ALIVE HTTP INTERNO)
+// Envía un pulso HTTP a la URL pública cada 8 min durante horario laboral
+// (Render en plan gratuito se duerme a los 15 min de inactividad)
+// ==========================================
+const RENDER_PUBLIC_URL = process.env.RENDER_EXTERNAL_URL || 'https://bot-whatsapp-taller.onrender.com';
+
+setInterval(async () => {
+  if (estaEnHorarioLaboral()) {
+    try {
+      // Pulso HTTP a la URL pública para reiniciar el contador de inactividad de Render
+      await fetch(`${RENDER_PUBLIC_URL}/health?from=internal_heartbeat_${Date.now()}`).catch(() => {});
+      
+      // Ping de presencia en WhatsApp para mantener viva la conexión TCP
+      if (socketWhatsApp && estadoConexion === 'conectado') {
+        await socketWhatsApp.sendPresenceUpdate('available').catch(() => {});
+      }
+    } catch (e) {}
+  }
+}, 8 * 60 * 1000);
+
 async function generarTextoEstatusTaller() {
   try {
     const snap = await getDocs(collection(firestore, 'units'));
@@ -772,23 +818,34 @@ async function ejecutarEnvioReal(grupoId, texto) {
     }
   }
 
-  try {
-    const res = await socketWhatsApp.sendMessage(grupoId, { text: texto });
-    if (res && res.key && res.key.id) {
-      mensajeStore.set(res.key.id, res.message);
-      if (mensajeStore.size > 200) {
-        const firstKey = mensajeStore.keys().next().value;
-        mensajeStore.delete(firstKey);
+  let ultimoError = null;
+  for (let intento = 1; intento <= 2; intento++) {
+    try {
+      if (intento === 2) {
+        console.log(`🔄 Reintentando envío (${intento}/2): refrescando conexión de WhatsApp...`);
+        iniciarWhatsApp();
+        await esperarConexion(12000);
       }
+
+      const res = await socketWhatsApp.sendMessage(grupoId, { text: texto });
+      if (res && res.key && res.key.id) {
+        mensajeStore.set(res.key.id, res.message);
+        if (mensajeStore.size > 200) {
+          const firstKey = mensajeStore.keys().next().value;
+          mensajeStore.delete(firstKey);
+        }
+      }
+      console.log(`📨 [${new Date().toLocaleTimeString('es-MX', { timeZone: 'America/Mexico_City' })}] Enviado a ${grupoId}: "${texto}"`);
+      registrarActividad('envio', texto, true);
+      return true;
+    } catch (error) {
+      ultimoError = error;
+      console.error(`❌ Error al enviar mensaje (Intento ${intento}):`, error.message);
     }
-    console.log(`📨 [${new Date().toLocaleTimeString('es-MX', { timeZone: 'America/Mexico_City' })}] Enviado a ${grupoId}: "${texto}"`);
-    registrarActividad('envio', texto, true);
-    return true;
-  } catch (error) {
-    console.error(`❌ Error al enviar mensaje:`, error.message);
-    registrarActividad('error', `Error al enviar: ${error.message}`, false);
-    return false;
   }
+
+  registrarActividad('error', `Error al enviar tras 2 intentos: ${ultimoError?.message || 'Desconocido'}`, false);
+  return false;
 }
 
 function construirMensajeIngreso(unit, numUnidad) {
