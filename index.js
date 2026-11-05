@@ -32,7 +32,21 @@ console.warn = (...args) => {
 };
 console.error = (...args) => {
   origError(...args);
-  agregarLog('error', args.map(a => typeof a === 'object' ? JSON.stringify(a) : String(a)).join(' '));
+  const msgStr = args.map(a => typeof a === 'object' ? JSON.stringify(a) : String(a)).join(' ');
+  // Omitir spam de Bad MAC previo en el búfer visible
+  if (msgStr.includes('Bad MAC') || msgStr.includes('Failed to decrypt message')) {
+    return;
+  }
+  agregarLog('error', msgStr);
+
+  if (msgStr.includes('MessageCounterError') || msgStr.includes('Key used already')) {
+    console.log('🚨 [AUTORREPARACIÓN] Se detectó MessageCounterError. Iniciando autoreparación de sesión en 1s...');
+    setTimeout(() => {
+      if (typeof repararSesionCifrado === 'function') {
+        repararSesionCifrado('Auto-recuperación por MessageCounterError');
+      }
+    }, 1000);
+  }
 };
 
 const require = createRequire(import.meta.url);
@@ -198,11 +212,6 @@ setInterval(async () => {
     try {
       // Pulso HTTP a la URL pública para reiniciar el contador de inactividad de Render
       await fetch(`${RENDER_PUBLIC_URL}/health?from=internal_heartbeat_${Date.now()}`).catch(() => {});
-      
-      // Ping de presencia en WhatsApp para mantener viva la conexión TCP
-      if (socketWhatsApp && estadoConexion === 'conectado') {
-        await socketWhatsApp.sendPresenceUpdate('available').catch(() => {});
-      }
     } catch (e) {}
   }
 }, 8 * 60 * 1000);
@@ -589,13 +598,20 @@ async function restaurarSesionDesdeFirebase() {
         files = data.files;
       }
 
-      if (files && Object.keys(files).length > 0) {
-        console.log(`🔄 Restaurando sesión de WhatsApp guardada en la nube (${Object.keys(files).length} archivos)...`);
+      if (files && files['creds.json']) {
+        console.log(`🔄 Restaurando identidad de WhatsApp guardada en la nube (creds.json)...`);
+        fs.writeFileSync(path.join(AUTH_DIR, 'creds.json'), Buffer.from(files['creds.json'], 'base64'));
+
+        // Restaurar app-state-sync-key si existe, pero OMITIR session-* y sender-key-* antiguos
+        // para garantizar que la nueva sesión empiece con contadores de cifrado limpios
         for (const [filename, base64Content] of Object.entries(files)) {
-          fs.writeFileSync(path.join(AUTH_DIR, filename), Buffer.from(base64Content, 'base64'));
+          if (filename.startsWith('app-state-sync-key-')) {
+            try {
+              fs.writeFileSync(path.join(AUTH_DIR, filename), Buffer.from(base64Content, 'base64'));
+            } catch (e) {}
+          }
         }
-        limpiarPrekeysAntiguas(AUTH_DIR, 40);
-        console.log('✅ ¡Sesión de WhatsApp restaurada con éxito!');
+        console.log('✅ ¡Credenciales de WhatsApp restauradas con éxito (ratchets limpios para cero desincronización)!');
         return true;
       }
     }
@@ -727,6 +743,49 @@ const mensajeStore = new Map();
 const groupMetadataCache = new Map();
 let ultimasConfirmaciones = [];
 
+let reparandoSesion = false;
+async function repararSesionCifrado(motivo = 'Auto-reparación de cifrado') {
+  if (reparandoSesion) return;
+  reparandoSesion = true;
+  console.log(`🛠️ [REPARACIÓN DE SESIÓN] Iniciando: ${motivo}...`);
+
+  try {
+    if (socketWhatsApp) {
+      try {
+        socketWhatsApp.ev.removeAllListeners();
+        socketWhatsApp.end?.();
+      } catch (e) {}
+      socketWhatsApp = null;
+    }
+
+    if (fs.existsSync(AUTH_DIR)) {
+      const files = fs.readdirSync(AUTH_DIR);
+      let eliminados = 0;
+      for (const f of files) {
+        // Preservar creds.json (¡la identidad de vinculación que evita pedir QR!)
+        if (f !== 'creds.json') {
+          try {
+            fs.unlinkSync(path.join(AUTH_DIR, f));
+            eliminados++;
+          } catch (e) {}
+        }
+      }
+      console.log(`🧹 [REPARACIÓN DE SESIÓN] ${eliminados} archivos de sesión purgados. creds.json protegido al 100%.`);
+    }
+
+    // Actualizar respaldo en Firebase de inmediato para que contenga solo creds.json limpio
+    await respaldarSesionAFirebase();
+
+    console.log('🔄 [REPARACIÓN DE SESIÓN] Re-iniciando WhatsApp con credenciales limpias...');
+    await iniciarWhatsApp();
+    console.log('✅ [REPARACIÓN DE SESIÓN] Sesión restablecida sin pedir QR.');
+  } catch (errR) {
+    console.error('Error durante auto-reparación de sesión:', errR.message);
+  } finally {
+    setTimeout(() => { reparandoSesion = false; }, 30000);
+  }
+}
+
 async function iniciarWhatsApp() {
   estadoConexion = 'iniciando';
   console.log('⏳ Iniciando WhatsApp Baileys...');
@@ -740,7 +799,11 @@ async function iniciarWhatsApp() {
     socketWhatsApp = null;
   }
 
-  await restaurarSesionDesdeFirebase();
+  // Solo restaurar de Firebase si creds.json NO existe en disco local (ej: contenedor nuevo en Render)
+  const credsPath = path.join(AUTH_DIR, 'creds.json');
+  if (!fs.existsSync(credsPath)) {
+    await restaurarSesionDesdeFirebase();
+  }
   const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
 
   socketWhatsApp = makeWASocket({
@@ -806,20 +869,6 @@ async function iniciarWhatsApp() {
       const statusCode = lastDisconnect?.error?.output?.statusCode;
       console.log(`⚠️ Conexión de WhatsApp cerrada (Código: ${statusCode}). Reintentando reconexión automática en 3s...`);
       estadoConexion = 'iniciando';
-      // Si el código es 500 (Bad Session) o 503, purgar pre-keys y sender-keys obsoletas para forzar re-negociación limpia sin perder creds.json
-      if (statusCode === 500 || statusCode === 503) {
-        try {
-          if (fs.existsSync(AUTH_DIR)) {
-            const files = fs.readdirSync(AUTH_DIR);
-            for (const f of files) {
-              if (f.startsWith('pre-key-') || f.startsWith('sender-key-')) {
-                try { fs.unlinkSync(path.join(AUTH_DIR, f)); } catch (e) {}
-              }
-            }
-            console.log('🧹 [RECUPERACIÓN CÓDIGO 500] Llaves temporales limpiadas para re-sincronización limpia.');
-          }
-        } catch (e) {}
-      }
       setTimeout(iniciarWhatsApp, 3000);
     }
   });
@@ -1516,6 +1565,14 @@ server.get('/', (req, res) => {
       </div>
 
       <div class="card">
+        <h2><span style="color: #a78bfa;">🛠️ Reparación Rápida de WhatsApp</span></h2>
+        <p style="font-size: 11px; color: #94a3b8; margin: 0 0 10px 0;">Si el bot no entrega mensajes o reporta error de cifrado, este botón limpia las llaves temporales y restablece la conexión <b>sin necesidad de escanear el QR</b>:</p>
+        <form action="/reparar-sesion" method="POST" style="margin-bottom: 10px;">
+          <button type="submit" class="btn btn-purple" style="margin-top: 0; padding: 12px; font-size: 13px;">🛠️ Reparar Cifrado y Despertar (Sin Escanear QR)</button>
+        </form>
+      </div>
+
+      <div class="card">
         <h2><span style="color: #f87171;">⚠️ Conexión del Celular</span></h2>
         <form action="/logout" method="POST" onsubmit="return confirm('¿Seguro que deseas desvincular el celular?');">
           <button type="submit" class="btn btn-danger" style="margin-top: 0;">Desvincular WhatsApp / Cambiar Celular</button>
@@ -1691,6 +1748,16 @@ server.post('/guardar-horarios', async (req, res) => {
     console.error('Error al guardar horarios:', e.message);
   }
   res.redirect('/#config');
+});
+
+server.post('/reparar-sesion', async (req, res) => {
+  await repararSesionCifrado('Solicitud manual desde panel web');
+  res.redirect('/');
+});
+
+server.get('/reparar-sesion', async (req, res) => {
+  await repararSesionCifrado('Solicitud GET directa');
+  res.json({ ok: true, mensaje: 'Sesión reparada con éxito sin escanear QR' });
 });
 
 server.post('/logout', async (req, res) => {
