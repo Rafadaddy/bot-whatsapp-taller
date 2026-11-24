@@ -205,7 +205,7 @@ setInterval(() => {
 // Envía un pulso HTTP a la URL pública cada 8 min durante horario laboral
 // (Render en plan gratuito se duerme a los 15 min de inactividad)
 // ==========================================
-const RENDER_PUBLIC_URL = process.env.RENDER_EXTERNAL_URL || 'https://bot-whatsapp-taller.onrender.com';
+const RENDER_PUBLIC_URL = process.env.RENDER_EXTERNAL_URL || 'https://bot-whatsapp-taller-2.onrender.com';
 
 setInterval(async () => {
   if (estaEnHorarioLaboral()) {
@@ -1608,9 +1608,12 @@ server.get('/', (req, res) => {
       setTimeout(() => location.reload(), 4000);
     ` : ''}
 
-    // Mantener activo el servidor en Render si esta página está abierta en la PC o celular
+    // Mantener activo el servidor en Render solo en horario laboral para que de noche duerma
+    const estaActivoHorario = ${botActivo};
     setInterval(() => {
-      fetch('/health?from=browser').catch(() => {});
+      if (estaActivoHorario) {
+        fetch('/health?from=browser').catch(() => {});
+      }
     }, 60000);
 
     // Reloj oficial del bot sincronizado en vivo (CDMX)
