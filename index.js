@@ -262,10 +262,13 @@ async function generarTextoEstatusTaller() {
       }
       const fallas = fallasText.length > 0 ? fallasText.join(' // ') : (u.reported_fault || 'En revisión');
 
-      // Si está por falta de refacción, recalcar la refacción faltante (limpia sin códigos para taller/WhatsApp)
+      // Si está por falta de refacción, recalcar la refacción faltante (limpia sin códigos ni cantidades para taller/WhatsApp)
       if (u.status === 'espera_refaccion') {
         const rawPieza = u.missing_parts_desc ? u.missing_parts_desc.trim() : 'Sin especificar';
-        const pieza = rawPieza.replace(/\[(?:NP\.\s*|COD\.\s*)?[^\]]+\]\s*/gi, '').trim();
+        const pieza = rawPieza
+          .replace(/\[(?:NP\.\s*|COD\.\s*)?[^\]]+\]\s*/gi, '')
+          .replace(/\s*\(\s*\d+(?:\.\d+)?\s*(?:pzas?|piezas?|juegos?|jgo)?\s*\)/gi, '')
+          .trim();
         return `*${num}* ${fallas} ⚠️ (POR FALTA DE REFACCIÓN: ${pieza})`;
       }
 
